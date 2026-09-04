@@ -12,6 +12,10 @@ class DownloadOperation: Operation, @unchecked Sendable {
 
     private var context: DownloadContext
 
+    private let session: URLSession
+
+    private weak var downloader: ImageResourceDownloader?
+
     /// 统一保护 Operation 状态与 URLSession task，避免回调线程和取消线程并发读写。
     private let stateLock = NSRecursiveLock()
 
@@ -37,8 +41,14 @@ class DownloadOperation: Operation, @unchecked Sendable {
         return _isFinished
     }
     
-    init(context: DownloadContext) {
+    init(
+        context: DownloadContext,
+        session: URLSession,
+        downloader: ImageResourceDownloader
+    ) {
         self.context = context
+        self.session = session
+        self.downloader = downloader
         super.init()
         context.operation = self
     }
@@ -64,7 +74,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
     
     override func main() {
         let urlRequest = URLRequest(url: context.key.url)
-        let task = URLSession.shared.downloadTask(with: urlRequest) { [weak self] tempURL, response, error in
+        let task = session.downloadTask(with: urlRequest) { [weak self] tempURL, response, error in
             guard let self else { return }
             defer {
                 self.clearTask()
@@ -79,27 +89,27 @@ class DownloadOperation: Operation, @unchecked Sendable {
                 } else {
                     transferError = .underlying(error)
                 }
-                ImageResourceDownloader.default.errorEnd(key: context.key, error: transferError)
+                downloader?.errorEnd(key: context.key, error: transferError)
                 return
             }
             guard let response = response as? HTTPURLResponse else {
-                ImageResourceDownloader.default.errorEnd(key: context.key, error: .invalidResponse)
+                downloader?.errorEnd(key: context.key, error: .invalidResponse)
                 return
             }
             guard (200 ... 299).contains(response.statusCode) else {
-                ImageResourceDownloader.default.errorEnd(key: context.key, error: .unacceptableStatusCode(response.statusCode))
+                downloader?.errorEnd(key: context.key, error: .unacceptableStatusCode(response.statusCode))
                 return
             }
             guard let tempURL else {
-                ImageResourceDownloader.default.errorEnd(key: context.key, error: .missingDownloadedFile)
+                downloader?.errorEnd(key: context.key, error: .missingDownloadedFile)
                 return
             }
             
             do {
                 let localURL = try self.persistDownloadedFile(from: tempURL)
-                ImageResourceDownloader.default.successEnd(key: context.key, localURL: localURL)
+                downloader?.successEnd(key: context.key, localURL: localURL)
             } catch {
-                ImageResourceDownloader.default.errorEnd(key: context.key, error: .underlying(error))
+                downloader?.errorEnd(key: context.key, error: .underlying(error))
             }
         }
         resume(task: task)

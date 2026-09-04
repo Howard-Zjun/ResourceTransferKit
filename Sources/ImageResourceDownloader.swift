@@ -12,7 +12,7 @@ public final class ImageResourceDownloader: NSObject {
 
     var maxDownloadRange: (Int, Int) = (3, 7)
 
-    var session: URLSession { URLSession.shared }
+    let session: URLSession
     
     /// 以资源键维护正在处理的下载上下文，用于请求去重与快速取消。
     var contexts: [ResourceKey: DownloadContext] = [:]
@@ -40,6 +40,14 @@ public final class ImageResourceDownloader: NSObject {
     public static let `default`: ImageResourceDownloader = .init()
     
     private override init() {
+        self.session = .shared
+        super.init()
+        configInit()
+    }
+
+    /// 仅供模块内部和测试注入自定义网络会话。
+    init(session: URLSession) {
+        self.session = session
         super.init()
         configInit()
     }
@@ -71,8 +79,8 @@ extension ImageResourceDownloader {
                 guard key != imageRequest.key else {
                     return nil
                 }
-                context.subscribers.removeAll { group in
-                    group.subscriberImageView === imageView
+                context.subscribers.removeAll { subscriber in
+                    subscriber.subscriberImageView === imageView
                 }
                 return context.subscribers.isEmpty ? key : nil
             }
@@ -88,8 +96,8 @@ extension ImageResourceDownloader {
         // 2. 命中相同资源时，共用已有下载 operation，只追加订阅者。
         if let context = contexts[imageRequest.key] {
             if let imageView {
-                let hasSubscribed = context.subscribers.contains { group in
-                    group.subscriberImageView === imageView
+                let hasSubscribed = context.subscribers.contains { subscriber in
+                    subscriber.subscriberImageView === imageView
                 }
                 if !hasSubscribed {
                     context.subscribers.append(
@@ -105,7 +113,7 @@ extension ImageResourceDownloader {
             return
         }
         let context = DownloadContext(request: imageRequest, imgV: imageView)
-        let operation = DownloadOperation(context: context)
+        let operation = DownloadOperation(context: context, session: session, downloader: self)
         contexts[imageRequest.key] = context
         downloadQueue.addOperation(operation)
     }
