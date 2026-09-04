@@ -7,6 +7,7 @@
 
 import UIKit
 
+// MARK: - 下载任务
 class DownloadOperation: Operation, @unchecked Sendable {
 
     private var context: DownloadContext
@@ -17,6 +18,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
     private var task: URLSessionDownloadTask?
     
     private var _isExecuting = false
+
     private var _isFinished = false
     
     override var isAsynchronous: Bool {

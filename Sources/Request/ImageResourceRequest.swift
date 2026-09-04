@@ -8,6 +8,7 @@
 import Foundation
 import UIKit
 
+// MARK: - 图片请求参数封装实现
 struct ImageResourceRequest: ResourceRequest {
     
     var key: ResourceKey {

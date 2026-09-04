@@ -7,6 +7,7 @@
 
 import UIKit
 
+// MARK: - 请求参数封装协议
 protocol ResourceRequest {
  
     var key: ResourceKey { get }

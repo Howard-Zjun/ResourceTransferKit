@@ -34,6 +34,7 @@ public final class ImageResourceDownloader: NSObject {
         }
     }
     
+    // 多线程管理
     private let downloadQueue: OperationQueue = .init()
     
     public static let `default`: ImageResourceDownloader = .init()

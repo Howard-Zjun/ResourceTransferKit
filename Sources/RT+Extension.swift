@@ -7,6 +7,7 @@
 
 import UIKit
 
+// MARK: - 图片便捷设置入口
 extension UIImageView {
     
     public func rt_load(

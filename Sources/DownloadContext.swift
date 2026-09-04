@@ -19,6 +19,7 @@ class DownloadSubscriber {
     }
 }
 
+// MARK: - 下载上下文
 final class DownloadContext {
     
     let key: ResourceKey
