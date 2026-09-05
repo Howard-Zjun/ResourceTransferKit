@@ -15,7 +15,7 @@ extension UIImageView {
         completion: ((URL) -> Void)? = nil,
         errorBlock: ((Error) -> Void)? = nil
     ) {
-        let request = ImageResourceRequest(url: resourceURL) { [weak self] localResourceURL in
+        let request = ImageResourceRequest(url: resourceURL, priority: .high) { [weak self] localResourceURL in
             do {
                 let data = try Data(contentsOf: localResourceURL, options: [])
                 if let image = UIImage(data: data) {
@@ -34,10 +34,10 @@ extension UIImageView {
                 errorBlock?(error)
             }
         }
-        ImageResourceDownloader.default.load(imageRequest: request, imageView: self)
+        ResourceDownloader.default.load(imageRequest: request, imageView: self)
     }
     
     public func rt_cancel() {
-        ImageResourceDownloader.default.cancel(imageView: self)
+        ResourceDownloader.default.cancel(imageView: self)
     }
 }

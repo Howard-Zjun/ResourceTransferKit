@@ -8,7 +8,7 @@
 import UIKit
 
 class DownloadSubscriber {
-        
+    
     let request: ResourceRequest
     
     weak var subscriberImageView: UIImageView?
@@ -30,9 +30,25 @@ final class DownloadContext {
     
     weak var operation: DownloadOperation?
     
-    init(request: ResourceRequest, imgV: UIImageView) {
+    var effectivePriority: RequestPriority
+    
+    let creationTime: Date
+    
+    init(request: ResourceRequest, imgV: UIImageView, priority: RequestPriority) {
         self.key = request.key
         self.destinationURL = request.savePath
         self.subscribers = [.init(request: request, subscriberImageView: imgV)]
+        self.effectivePriority = priority
+        creationTime = .init()
+    }
+}
+
+enum RequestPriority: Int, Comparable {
+    case low
+    case normal
+    case high
+    
+    static func < (lhs: RequestPriority, rhs: RequestPriority) -> Bool {
+        lhs.rawValue < rhs.rawValue
     }
 }

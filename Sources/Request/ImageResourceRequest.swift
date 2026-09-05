@@ -20,17 +20,21 @@ struct ImageResourceRequest: ResourceRequest {
     /// 下载完成后资源的最终本地位置。
     let savePath: URL
     
+    let initialPriority: RequestPriority
+    
     let completion: ((URL) -> Void)?
     
     let errorBlock: ((ResourceTransferError) -> Void)?
     
     init(
         url: URL,
+        priority: RequestPriority = .normal,
         completion: ((URL) -> Void)? = nil,
         errorBlock: ((ResourceTransferError) -> Void)? = nil
     ) {
         self.url = url
         self.savePath = Self.defaultSavePath(for: url)
+        self.initialPriority = priority
         self.completion = completion
         self.errorBlock = errorBlock
     }

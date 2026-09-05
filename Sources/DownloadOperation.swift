@@ -14,7 +14,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
 
     private let session: URLSession
 
-    private weak var downloader: ImageResourceDownloader?
+    private weak var downloader: ResourceDownloader?
 
     /// 统一保护 Operation 状态与 URLSession task，避免回调线程和取消线程并发读写。
     private let stateLock = NSRecursiveLock()
@@ -44,7 +44,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
     init(
         context: DownloadContext,
         session: URLSession,
-        downloader: ImageResourceDownloader
+        downloader: ResourceDownloader
     ) {
         self.context = context
         self.session = session
