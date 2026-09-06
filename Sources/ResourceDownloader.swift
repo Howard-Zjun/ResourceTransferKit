@@ -8,19 +8,24 @@
 import Foundation
 import UIKit
 
+protocol ResourceDownloaderDelegate: NSObjectProtocol {
+    
+    func contextFromDownloading(key: ResourceKey) -> DownloadContext?
+    
+    func downloadMaxQueueChange()
+    
+    func downloadSuccess(key: ResourceKey, result: ResourceDownloadResult)
+    
+    func downloadFail(key: ResourceKey, error: ResourceTransferError)
+}
+
 public final class ResourceDownloader: NSObject {
 
     var maxDownloadRange: (Int, Int) = (3, 7)
 
     private var session: URLSession!
     
-    /// 以资源键维护正在处理的下载上下文，用于请求去重与快速取消。
-    private var downloadingContexts: [ResourceKey: DownloadContext] = [:]
-    
-    /// 等待队列
-    private var waitingContexts: [ResourceKey: DownloadContext] = [:]
-    
-    private let lock: NSLock = .init()
+    weak var schedulerDelegate: ResourceDownloaderDelegate?
     
     public var maxDownloadCount: Int {
         set {
@@ -33,7 +38,7 @@ public final class ResourceDownloader: NSObject {
                 count = newValue
             }
             downloadQueue.maxConcurrentOperationCount = count
-            scheduleWaitingContexts()
+            schedulerDelegate?.downloadMaxQueueChange()
         }
         get {
             downloadQueue.maxConcurrentOperationCount
@@ -63,136 +68,22 @@ public final class ResourceDownloader: NSObject {
     }
 }
 
-// TODO: 之后看下需不需要处理304缓存映射码
-// TODO: 看下如何分段下载提高效率
-// TODO: 看下如何断点续传提供性能
-
-// MARK: - 图片加载入口
 extension ResourceDownloader {
-
-    func load(imageRequest: ResourceRequest, imageView: UIImageView? = nil) {
-        lock.lock()
-        defer { lock.unlock() }
-
-        // 1. 当前视图若已订阅其他资源，先解除旧订阅。
-        if let imageView {
-            removeSubscriber(imageView, exceptFor: imageRequest.key, from: &waitingContexts)
-            removeSubscriber(imageView, exceptFor: imageRequest.key, from: &downloadingContexts)
-        }
-
-        // 2. 命中相同资源时，共用已有任务；等待中的任务还会提升到最高订阅优先级。
-        if let context = downloadingContexts[imageRequest.key] ?? waitingContexts[imageRequest.key] {
-            context.subscribers.append(
-                DownloadSubscriber(request: imageRequest, subscriberImageView: imageView)
-            )
-            context.effectivePriority = max(context.effectivePriority, imageRequest.initialPriority)
-            return
-        }
-
-        // 3. 首次请求先进入等待队列；仅在有下载槽位时创建 operation。
-        guard let imageView else {
-            return
-        }
-        let context = DownloadContext(request: imageRequest, imgV: imageView, priority: imageRequest.initialPriority)
-        waitingContexts[imageRequest.key] = context
-        startWaitingContextsIfPossible()
+    
+    func addDownload(context: DownloadContext) {
+        let operation = DownloadOperation(context: context, session: session, downloader: self)
+        downloadQueue.addOperation(operation)
     }
 }
 
-// MARK: - 取消加载入口
 extension ResourceDownloader {
     
-    func cancel(key: ResourceKey) {
-        lock.lock()
-        waitingContexts.removeValue(forKey: key)
-        if let context = downloadingContexts.removeValue(forKey: key) {
-            context.operation?.cancel()
-        }
-        startWaitingContextsIfPossible()
-        lock.unlock()
+    func downloadSuccess(key: ResourceKey, result: ResourceDownloadResult) {
+        schedulerDelegate?.downloadSuccess(key: key, result: result)
     }
     
-    func cancel(imageView: UIImageView) {
-        lock.lock()
-        removeSubscriber(imageView, exceptFor: nil, from: &waitingContexts)
-        removeSubscriber(imageView, exceptFor: nil, from: &downloadingContexts)
-        startWaitingContextsIfPossible()
-        lock.unlock()
-    }
-}
-
-// MARK: - 任务下载结果回调
-extension ResourceDownloader {
-
-    func successEnd(key: ResourceKey, result: ResourceDownloadResult) {
-        lock.lock()
-        let subscribers = downloadingContexts.removeValue(forKey: key)?.subscribers ?? []
-        startWaitingContextsIfPossible()
-        lock.unlock()
-
-        subscribers.forEach { subscriber in
-            subscriber.request.completion?(result)
-        }
-    }
-
-    func errorEnd(key: ResourceKey, error: ResourceTransferError) {
-        lock.lock()
-        let subscribers = downloadingContexts.removeValue(forKey: key)?.subscribers ?? []
-        startWaitingContextsIfPossible()
-        lock.unlock()
-
-        subscribers.forEach { subscriber in
-            subscriber.request.errorBlock?(error)
-        }
-    }
-}
-
-// MARK: - 加入队列下载入口
-extension ResourceDownloader {
-    
-    private func scheduleWaitingContexts() {
-        lock.lock()
-        startWaitingContextsIfPossible()
-        lock.unlock()
-    }
-    
-    /// 调用方必须持有 lock；按优先级降序、创建时间升序填充所有可用下载槽位。
-    private func startWaitingContextsIfPossible() {
-        while downloadingContexts.count < maxDownloadCount,
-              let context = nextWaitingContext() {
-            waitingContexts.removeValue(forKey: context.key)
-            let operation = DownloadOperation(context: context, session: session, downloader: self)
-            downloadingContexts[context.key] = context
-            downloadQueue.addOperation(operation)
-        }
-    }
-    
-    private func nextWaitingContext() -> DownloadContext? {
-        waitingContexts.values.max { lhs, rhs in
-            if lhs.effectivePriority != rhs.effectivePriority {
-                return lhs.effectivePriority < rhs.effectivePriority
-            }
-            return lhs.creationTime > rhs.creationTime
-        }
-    }
-    
-    private func removeSubscriber(
-        _ imageView: UIImageView,
-        exceptFor retainedKey: ResourceKey?,
-        from contexts: inout [ResourceKey: DownloadContext]
-    ) {
-        let keysToRemove = contexts.compactMap { key, context -> ResourceKey? in
-            guard key != retainedKey else {
-                return nil
-            }
-            context.subscribers.removeAll { $0.subscriberImageView === imageView }
-            return context.subscribers.isEmpty ? key : nil
-        }
-
-        for key in keysToRemove {
-            let context = contexts.removeValue(forKey: key)
-            context?.operation?.cancel()
-        }
+    func downloadFail(key: ResourceKey, error: ResourceTransferError) {
+        schedulerDelegate?.downloadFail(key: key, error: error)
     }
 }
 
@@ -202,20 +93,15 @@ extension ResourceDownloader: URLSessionDownloadDelegate {
     }
 
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        lock.lock()
-        defer { lock.unlock() }
-
         guard let url = downloadTask.originalRequest?.url,
-              let context = downloadingContexts[.init(url: url)] else {
+              let context = schedulerDelegate?.contextFromDownloading(key: .init(url: url)) else {
             return
         }
 
         if context.mimeType == nil {
             context.mimeType = downloadTask.response?.mimeType
         }
-        if context.fileSize == nil {
-            context.fileSize = totalBytesWritten
-        }
+        context.fileSize = totalBytesWritten
         if totalBytesExpectedToWrite > 0 {
             context.progress = Float(totalBytesWritten) / Float(totalBytesExpectedToWrite)
         }

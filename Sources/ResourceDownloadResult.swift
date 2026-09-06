@@ -9,13 +9,13 @@ import UIKit
 
 public struct ResourceDownloadResult {
     
-    let localURL: URL
+    public let localURL: URL
     
-    let fileSize: Int64?
+    public let fileSize: Int64?
     
-    let mimeType: String?
+    public let mimeType: String?
     
-    var expectedType: ResourceType? {
+    public var expectedType: ResourceType? {
         switch mimeType {
             case let value where value?.hasPrefix("image/") == true: .image
             case let value where value?.hasPrefix("audio/") == true: .audio
@@ -27,7 +27,7 @@ public struct ResourceDownloadResult {
     }
 }
 
-enum ResourceType {
+public enum ResourceType {
     case image
     case audio
     case video

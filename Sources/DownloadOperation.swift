@@ -89,27 +89,27 @@ class DownloadOperation: Operation, @unchecked Sendable {
                 } else {
                     transferError = .underlying(error)
                 }
-                downloader?.errorEnd(key: context.key, error: transferError)
+                downloader?.downloadFail(key: context.key, error: transferError)
                 return
             }
             guard let response = response as? HTTPURLResponse else {
-                downloader?.errorEnd(key: context.key, error: .invalidResponse)
+                downloader?.downloadFail(key: context.key, error: .invalidResponse)
                 return
             }
             guard (200 ... 299).contains(response.statusCode) else {
-                downloader?.errorEnd(key: context.key, error: .unacceptableStatusCode(response.statusCode))
+                downloader?.downloadFail(key: context.key, error: .unacceptableStatusCode(response.statusCode))
                 return
             }
             guard let tempURL else {
-                downloader?.errorEnd(key: context.key, error: .missingDownloadedFile)
+                downloader?.downloadFail(key: context.key, error: .missingDownloadedFile)
                 return
             }
             
             do {
                 let localURL = try self.persistDownloadedFile(from: tempURL)
-                downloader?.successEnd(key: context.key, result: .init(localURL: localURL, fileSize: context.fileSize, mimeType: context.mimeType))
+                downloader?.downloadSuccess(key: context.key, result: .init(localURL: localURL, fileSize: context.fileSize, mimeType: context.mimeType))
             } catch {
-                downloader?.errorEnd(key: context.key, error: .underlying(error))
+                downloader?.downloadFail(key: context.key, error: .underlying(error))
             }
         }
         resume(task: task)

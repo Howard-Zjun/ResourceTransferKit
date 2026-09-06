@@ -34,10 +34,10 @@ extension UIImageView {
                 errorBlock?(error)
             }
         }
-        ResourceDownloader.default.load(imageRequest: request, imageView: self)
+        ResourceScheduler.default.load(imageRequest: request, imageView: self)
     }
     
     public func rt_cancel() {
-        ResourceDownloader.default.cancel(imageView: self)
+        ResourceScheduler.default.cancel(imageView: self)
     }
 }
