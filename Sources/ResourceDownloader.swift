@@ -12,15 +12,15 @@ public final class ResourceDownloader: NSObject {
 
     var maxDownloadRange: (Int, Int) = (3, 7)
 
-    let session: URLSession
+    private var session: URLSession!
     
     /// 以资源键维护正在处理的下载上下文，用于请求去重与快速取消。
-    var downloadingContexts: [ResourceKey: DownloadContext] = [:]
+    private var downloadingContexts: [ResourceKey: DownloadContext] = [:]
     
     /// 等待队列
-    var waitingContexts: [ResourceKey: DownloadContext] = [:]
+    private var waitingContexts: [ResourceKey: DownloadContext] = [:]
     
-    let lock: NSLock = .init()
+    private let lock: NSLock = .init()
     
     public var maxDownloadCount: Int {
         set {
@@ -46,15 +46,15 @@ public final class ResourceDownloader: NSObject {
     public static let `default`: ResourceDownloader = .init()
     
     private override init() {
-        self.session = .shared
         super.init()
+        session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
         configInit()
     }
 
-    /// 仅供模块内部和测试注入自定义网络会话。
-    init(session: URLSession) {
-        self.session = session
+    /// 仅供模块内部和测试注入自定义网络配置。
+    init(configuration: URLSessionConfiguration) {
         super.init()
+        session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         configInit()
     }
     
@@ -69,15 +69,8 @@ public final class ResourceDownloader: NSObject {
 
 // MARK: - 图片加载入口
 extension ResourceDownloader {
-    
-    func load(url: URL, imageView: UIImageView? = nil, completion: @escaping (URL) -> Void, errorBlock: @escaping (ResourceTransferError) -> Void) {
-        load(
-            imageRequest: .init(url: url, priority: imageView != nil ? .high : .low, completion: completion, errorBlock: errorBlock),
-            imageView: imageView
-        )
-    }
 
-    func load(imageRequest: ImageResourceRequest, imageView: UIImageView? = nil) {
+    func load(imageRequest: ResourceRequest, imageView: UIImageView? = nil) {
         lock.lock()
         defer { lock.unlock() }
 
@@ -89,11 +82,10 @@ extension ResourceDownloader {
 
         // 2. 命中相同资源时，共用已有任务；等待中的任务还会提升到最高订阅优先级。
         if let context = downloadingContexts[imageRequest.key] ?? waitingContexts[imageRequest.key] {
-            appendSubscriber(
-                imageRequest,
-                imageView: imageView,
-                to: context
+            context.subscribers.append(
+                DownloadSubscriber(request: imageRequest, subscriberImageView: imageView)
             )
+            context.effectivePriority = max(context.effectivePriority, imageRequest.initialPriority)
             return
         }
 
@@ -132,14 +124,14 @@ extension ResourceDownloader {
 // MARK: - 任务下载结果回调
 extension ResourceDownloader {
 
-    func successEnd(key: ResourceKey, localURL: URL) {
+    func successEnd(key: ResourceKey, result: ResourceDownloadResult) {
         lock.lock()
         let subscribers = downloadingContexts.removeValue(forKey: key)?.subscribers ?? []
         startWaitingContextsIfPossible()
         lock.unlock()
 
         subscribers.forEach { subscriber in
-            subscriber.request.completion?(localURL)
+            subscriber.request.completion?(result)
         }
     }
 
@@ -184,26 +176,6 @@ extension ResourceDownloader {
         }
     }
     
-    private func appendSubscriber(
-        _ request: ImageResourceRequest,
-        imageView: UIImageView?,
-        to context: DownloadContext
-    ) {
-        guard let imageView else {
-            return
-        }
-        let hasSubscribed = context.subscribers.contains {
-            $0.subscriberImageView === imageView
-        }
-        guard !hasSubscribed else {
-            return
-        }
-        context.subscribers.append(
-            DownloadSubscriber(request: request, subscriberImageView: imageView)
-        )
-        context.effectivePriority = max(context.effectivePriority, request.initialPriority)
-    }
-    
     private func removeSubscriber(
         _ imageView: UIImageView,
         exceptFor retainedKey: ResourceKey?,
@@ -220,6 +192,32 @@ extension ResourceDownloader {
         for key in keysToRemove {
             let context = contexts.removeValue(forKey: key)
             context?.operation?.cancel()
+        }
+    }
+}
+
+extension ResourceDownloader: URLSessionDownloadDelegate {
+    
+    public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+    }
+
+    public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let url = downloadTask.originalRequest?.url,
+              let context = downloadingContexts[.init(url: url)] else {
+            return
+        }
+
+        if context.mimeType == nil {
+            context.mimeType = downloadTask.response?.mimeType
+        }
+        if context.fileSize == nil {
+            context.fileSize = totalBytesWritten
+        }
+        if totalBytesExpectedToWrite > 0 {
+            context.progress = Float(totalBytesWritten) / Float(totalBytesExpectedToWrite)
         }
     }
 }

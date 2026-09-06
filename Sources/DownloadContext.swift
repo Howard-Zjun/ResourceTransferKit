@@ -6,6 +6,115 @@
 //
 
 import UIKit
+import UniformTypeIdentifiers
+
+// MARK: - 下载上下文
+final class DownloadContext {
+    
+    let key: ResourceKey
+    
+    var destinationURL: URL
+    
+    var subscribers: [DownloadSubscriber]
+    
+    weak var operation: DownloadOperation?
+    
+    var effectivePriority: RequestPriority
+    
+    let creationTime: Date
+    
+    var progress: Float? {
+        didSet {
+            guard let progress else { return }
+            subscribers.forEach { subscriber in
+                subscriber.request.progressBlock?(progress)
+            }
+        }
+    }
+    
+    var mimeType: String? {
+        didSet {
+            guard oldValue == nil, let mimeType else {
+                return
+            }
+            
+            let resourceType = UTType(mimeType: mimeType)
+            let filename = destinationURL
+                .deletingPathExtension()
+                .lastPathComponent
+            let directoryName = resourceType.map {
+                Self.directoryName(for: $0, mimeType: mimeType)
+            } ?? "Other"
+            var updatedURL = Self.resourcesRootURL
+                .appendingPathComponent(
+                    directoryName,
+                    isDirectory: true
+                )
+                .appendingPathComponent(filename)
+            if let pathExtension = resourceType?.preferredFilenameExtension {
+                updatedURL = updatedURL.appendingPathExtension(pathExtension)
+            } else if !destinationURL.pathExtension.isEmpty {
+                updatedURL = updatedURL.appendingPathExtension(destinationURL.pathExtension)
+            }
+            destinationURL = updatedURL
+        }
+    }
+    
+    var fileSize: Int64?
+    
+    init(request: ResourceRequest, imgV: UIImageView, priority: RequestPriority) {
+        self.key = request.key
+        self.destinationURL = Self.defaultSavePath(for: request.url)
+        self.subscribers = [.init(request: request, subscriberImageView: imgV)]
+        self.effectivePriority = priority
+        creationTime = .init()
+    }
+    
+}
+
+extension DownloadContext {
+    
+    private static func defaultSavePath(for url: URL) -> URL {
+        let identifier = url.absoluteString.addingPercentEncoding(
+            withAllowedCharacters: .alphanumerics
+        ) ?? UUID().uuidString
+        let filename = url.pathExtension.isEmpty
+            ? identifier
+            : "\(identifier).\(url.pathExtension)"
+
+        return resourcesRootURL
+            .appendingPathComponent("Images", isDirectory: true)
+            .appendingPathComponent(filename)
+    }
+
+    private static var resourcesRootURL: URL {
+        let cachesDirectory = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        )[0]
+        return cachesDirectory
+            .appendingPathComponent("ResourceTransferKit", isDirectory: true)
+    }
+
+    private static func directoryName(for type: UTType, mimeType: String) -> String {
+        if type.conforms(to: .image) {
+            return "Images"
+        }
+        if type.conforms(to: .audio) {
+            return "Audio"
+        }
+        if type.conforms(to: .movie) {
+            return "Videos"
+        }
+        if type.conforms(to: .pdf) {
+            return "PDF"
+        }
+        if ["application/zip", "application/x-zip-compressed"].contains(mimeType.lowercased()) {
+            return "ZIP"
+        }
+        return "Other"
+    }
+}
 
 class DownloadSubscriber {
     
@@ -16,30 +125,6 @@ class DownloadSubscriber {
     init(request: ResourceRequest, subscriberImageView: UIImageView? = nil) {
         self.request = request
         self.subscriberImageView = subscriberImageView
-    }
-}
-
-// MARK: - 下载上下文
-final class DownloadContext {
-    
-    let key: ResourceKey
-    
-    let destinationURL: URL
-    
-    var subscribers: [DownloadSubscriber]
-    
-    weak var operation: DownloadOperation?
-    
-    var effectivePriority: RequestPriority
-    
-    let creationTime: Date
-    
-    init(request: ResourceRequest, imgV: UIImageView, priority: RequestPriority) {
-        self.key = request.key
-        self.destinationURL = request.savePath
-        self.subscribers = [.init(request: request, subscriberImageView: imgV)]
-        self.effectivePriority = priority
-        creationTime = .init()
     }
 }
 

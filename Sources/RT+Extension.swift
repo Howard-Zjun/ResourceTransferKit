@@ -12,16 +12,16 @@ extension UIImageView {
     
     public func rt_load(
         resourceURL: URL,
-        completion: ((URL) -> Void)? = nil,
+        completion: ((ResourceDownloadResult) -> Void)? = nil,
         errorBlock: ((Error) -> Void)? = nil
     ) {
-        let request = ImageResourceRequest(url: resourceURL, priority: .high) { [weak self] localResourceURL in
+        let request = ResourceRequest(url: resourceURL, priority: .high) { [weak self] result in
             do {
-                let data = try Data(contentsOf: localResourceURL, options: [])
+                let data = try Data(contentsOf: result.localURL, options: [])
                 if let image = UIImage(data: data) {
                     Task { @MainActor in
                         self?.image = image
-                        completion?(localResourceURL)
+                        completion?(result)
                     }
                 }
             } catch {

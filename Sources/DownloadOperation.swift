@@ -107,7 +107,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
             
             do {
                 let localURL = try self.persistDownloadedFile(from: tempURL)
-                downloader?.successEnd(key: context.key, localURL: localURL)
+                downloader?.successEnd(key: context.key, result: .init(localURL: localURL, fileSize: context.fileSize, mimeType: context.mimeType))
             } catch {
                 downloader?.errorEnd(key: context.key, error: .underlying(error))
             }
