@@ -7,15 +7,15 @@
 
 import UIKit
 
-struct ResourceKey: Hashable {
+public struct ResourceKey: Hashable {
     
     let url: URL
 
-    static func == (lhs: ResourceKey, rhs: ResourceKey) -> Bool {
+    public static func == (lhs: ResourceKey, rhs: ResourceKey) -> Bool {
         lhs.url.path == rhs.url.path
     }
 
-    func hash(into hasher: inout Hasher) {
+    public func hash(into hasher: inout Hasher) {
         hasher.combine(url.path)
     }
 }

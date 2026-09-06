@@ -7,7 +7,7 @@
 
 import UIKit
 
-// MARK: - 图片便捷设置入口
+// MARK: - 图片便捷式入口
 extension UIImageView {
     
     public func rt_load(
@@ -34,10 +34,10 @@ extension UIImageView {
                 errorBlock?(error)
             }
         }
-        ResourceScheduler.default.load(imageRequest: request, imageView: self)
+        ResourceScheduler.default.load(request: request, subscriber: DownloadResultImageSubscriber(imageView: self))
     }
     
     public func rt_cancel() {
-        ResourceScheduler.default.cancel(imageView: self)
+        ResourceScheduler.default.cancel(subscriber: DownloadResultImageSubscriber(imageView: self))
     }
 }

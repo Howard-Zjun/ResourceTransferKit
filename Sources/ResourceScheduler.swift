@@ -51,12 +51,12 @@ extension ResourceScheduler {
         startWaitingContextsIfPossible()
     }
     
-    func cancel(imageView: UIImageView) {
+    func cancel(subscriber: DownloadResultSubscriber) {
         lock.lock()
         defer { lock.unlock() }
         
-        removeSubscriber(imageView, exceptFor: nil, from: &waitingContexts)
-        removeSubscriber(imageView, exceptFor: nil, from: &downloadingContexts)
+        removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
+        removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
         startWaitingContextsIfPossible()
     }
 }
@@ -66,31 +66,26 @@ extension ResourceScheduler {
 // TODO: 看下如何断点续传提供性能
 extension ResourceScheduler {
     
-    func load(imageRequest: ResourceRequest, imageView: UIImageView? = nil) {
+    func load(request: ResourceRequest, subscriber: DownloadResultSubscriber) {
         lock.lock()
         defer { lock.unlock() }
 
-        // 1. 当前视图若已订阅其他资源，先解除旧订阅。
-        if let imageView {
-            removeSubscriber(imageView, exceptFor: imageRequest.key, from: &waitingContexts)
-            removeSubscriber(imageView, exceptFor: imageRequest.key, from: &downloadingContexts)
-        }
+        // 1. 当前订阅者若已订阅其他资源，先解除旧订阅。
+        removeSubscriber(subscriber, exceptFor: request.key, from: &waitingContexts)
+        removeSubscriber(subscriber, exceptFor: request.key, from: &downloadingContexts)
 
         // 2. 命中相同资源时，共用已有任务；等待中的任务还会提升到最高订阅优先级。
-        if let context = downloadingContexts[imageRequest.key] ?? waitingContexts[imageRequest.key] {
+        if let context = downloadingContexts[request.key] ?? waitingContexts[request.key] {
             context.subscribers.append(
-                DownloadSubscriber(request: imageRequest, subscriberImageView: imageView)
+                DownloadSubscriber(request: request, resultSubscriber: subscriber)
             )
-            context.effectivePriority = max(context.effectivePriority, imageRequest.initialPriority)
+            context.effectivePriority = max(context.effectivePriority, request.initialPriority)
             return
         }
 
         // 3. 首次请求先进入等待队列；仅在有下载槽位时创建 operation。
-        guard let imageView else {
-            return
-        }
-        let context = DownloadContext(request: imageRequest, imgV: imageView, priority: imageRequest.initialPriority)
-        waitingContexts[imageRequest.key] = context
+        let context = DownloadContext(request: request, subscriber: subscriber, priority: request.initialPriority)
+        waitingContexts[request.key] = context
         startWaitingContextsIfPossible()
     }
 }
@@ -117,7 +112,7 @@ extension ResourceScheduler {
     }
     
     private func removeSubscriber(
-        _ imageView: UIImageView,
+        _ subscriber: DownloadResultSubscriber,
         exceptFor retainedKey: ResourceKey?,
         from contexts: inout [ResourceKey: DownloadContext]
     ) {
@@ -125,7 +120,7 @@ extension ResourceScheduler {
             guard key != retainedKey else {
                 return nil
             }
-            context.subscribers.removeAll { $0.subscriberImageView === imageView }
+            context.subscribers.removeAll { $0.resultSubscriber.matches(subscriber) }
             return context.subscribers.isEmpty ? key : nil
         }
 
@@ -158,9 +153,38 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         startWaitingContextsIfPossible()
         lock.unlock()
 
-        subscribers.forEach { subscriber in
-            subscriber.request.completion?(result)
+        var copies: [URL: Result<Void, Error>] = [:]
+        var notifications: [() -> Void] = []
+        let fileManager = FileManager.default
+        for subscriber in subscribers {
+            do {
+                if let path = subscriber.request.customSavePath,
+                   path.standardizedFileURL != result.localURL.standardizedFileURL {
+                    let destination = path.standardizedFileURL
+                    if let copy = copies[destination] {
+                        try copy.get()
+                    } else {
+                        let copy = Result<Void, Error> {
+                            try fileManager.createDirectory(
+                                at: destination.deletingLastPathComponent(),
+                                withIntermediateDirectories: true
+                            )
+                            if fileManager.fileExists(atPath: destination.path) {
+                                try fileManager.removeItem(at: destination)
+                            }
+                            try fileManager.copyItem(at: result.localURL, to: destination)
+                        }
+                        copies[destination] = copy
+                        try copy.get()
+                    }
+                }
+            } catch {
+                notifications.append { subscriber.request.errorBlock?(.underlying(error)) }
+                continue
+            }
+            notifications.append { subscriber.request.completion?(result) }
         }
+        notifications.forEach { $0() }
     }
     
     func downloadFail(key: ResourceKey, error: ResourceTransferError) {

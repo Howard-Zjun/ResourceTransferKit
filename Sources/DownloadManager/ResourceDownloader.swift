@@ -24,6 +24,10 @@ public final class ResourceDownloader: NSObject {
     var maxDownloadRange: (Int, Int) = (3, 7)
 
     private var session: URLSession!
+
+    private var operationsByTaskIdentifier: [Int: DownloadOperation] = [:]
+
+    private let operationsLock: NSLock = .init()
     
     weak var schedulerDelegate: ResourceDownloaderDelegate?
     
@@ -74,6 +78,19 @@ extension ResourceDownloader {
         let operation = DownloadOperation(context: context, session: session, downloader: self)
         downloadQueue.addOperation(operation)
     }
+
+    func register(_ operation: DownloadOperation, for task: URLSessionTask) {
+        operationsLock.lock()
+        operationsByTaskIdentifier[task.taskIdentifier] = operation
+        operationsLock.unlock()
+    }
+
+    func removeTaskIdentifier(for task: URLSessionTask) -> DownloadOperation? {
+        operationsLock.lock()
+        let operation = operationsByTaskIdentifier.removeValue(forKey: task.taskIdentifier)
+        operationsLock.unlock()
+        return operation
+    }
 }
 
 extension ResourceDownloader {
@@ -90,6 +107,10 @@ extension ResourceDownloader {
 extension ResourceDownloader: URLSessionDownloadDelegate {
     
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
+        removeTaskIdentifier(for: downloadTask)?.didFinishDownloading(
+            at: location,
+            response: downloadTask.response
+        )
     }
 
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
@@ -98,6 +119,9 @@ extension ResourceDownloader: URLSessionDownloadDelegate {
             return
         }
 
+        if context.startDownloadTime == nil {
+            context.startDownloadTime = .init()
+        }
         if context.mimeType == nil {
             context.mimeType = downloadTask.response?.mimeType
         }
@@ -105,6 +129,10 @@ extension ResourceDownloader: URLSessionDownloadDelegate {
         if totalBytesExpectedToWrite > 0 {
             context.progress = Float(totalBytesWritten) / Float(totalBytesExpectedToWrite)
         }
+    }
+
+    public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        removeTaskIdentifier(for: task)?.didComplete(with: error)
     }
 }
 

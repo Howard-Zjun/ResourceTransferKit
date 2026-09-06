@@ -74,47 +74,23 @@ class DownloadOperation: Operation, @unchecked Sendable {
     
     override func main() {
         let urlRequest = URLRequest(url: context.key.url)
-        let task = session.downloadTask(with: urlRequest) { [weak self] tempURL, response, error in
-            guard let self else { return }
-            defer {
-                self.clearTask()
-                self.finish()
-            }
-            guard !isCancelled else { return }
-
-            if let error {
-                let transferError: ResourceTransferError
-                if let urlError = error as? URLError {
-                    transferError = .network(urlError)
-                } else {
-                    transferError = .underlying(error)
-                }
-                downloader?.downloadFail(key: context.key, error: transferError)
-                return
-            }
-            guard let response = response as? HTTPURLResponse else {
-                downloader?.downloadFail(key: context.key, error: .invalidResponse)
-                return
-            }
-            guard (200 ... 299).contains(response.statusCode) else {
-                downloader?.downloadFail(key: context.key, error: .unacceptableStatusCode(response.statusCode))
-                return
-            }
-            guard let tempURL else {
-                downloader?.downloadFail(key: context.key, error: .missingDownloadedFile)
-                return
-            }
-            
-            do {
-                let localURL = try self.persistDownloadedFile(from: tempURL)
-                downloader?.downloadSuccess(key: context.key, result: .init(localURL: localURL, fileSize: context.fileSize, mimeType: context.mimeType))
-            } catch {
-                downloader?.downloadFail(key: context.key, error: .underlying(error))
-            }
-        }
+        let task = session.downloadTask(with: urlRequest)
         resume(task: task)
     }
 
+    private func resume(task: URLSessionDownloadTask) {
+        stateLock.lock()
+        guard !isCancelled, !_isFinished else {
+            stateLock.unlock()
+            task.cancel()
+            return
+        }
+        self.task = task
+        downloader?.register(self, for: task)
+        task.resume()
+        stateLock.unlock()
+    }
+    
     override func cancel() {
         super.cancel()
         // MARK: - 这里看之后能不能升级，如果已经下载有数据，能否将数据暂存用于下次使用
@@ -139,23 +115,15 @@ class DownloadOperation: Operation, @unchecked Sendable {
         didChangeValue(for: \.isFinished)
         stateLock.unlock()
     }
-
-    private func resume(task: URLSessionDownloadTask) {
-        stateLock.lock()
-        guard !isCancelled, !_isFinished else {
-            stateLock.unlock()
-            task.cancel()
-            return
-        }
-        self.task = task
-        task.resume()
-        stateLock.unlock()
-    }
-
+    
     private func clearTask() {
         stateLock.lock()
-        task = nil
+        let task = task
+        self.task = nil
         stateLock.unlock()
+        if let task {
+            _ = downloader?.removeTaskIdentifier(for: task)
+        }
     }
 
     private func cancelTask() {
@@ -163,23 +131,74 @@ class DownloadOperation: Operation, @unchecked Sendable {
         let task = task
         self.task = nil
         stateLock.unlock()
+        if let task {
+            _ = downloader?.removeTaskIdentifier(for: task)
+        }
         task?.cancel()
+    }
+}
+
+extension DownloadOperation {
+    
+    func didFinishDownloading(at temporaryURL: URL, response: URLResponse?) {
+        defer {
+            clearTask()
+            finish()
+        }
+        guard !isCancelled else { return }
+        guard let response = response as? HTTPURLResponse else {
+            downloader?.downloadFail(key: context.key, error: .invalidResponse)
+            return
+        }
+        guard (200 ... 299).contains(response.statusCode) else {
+            downloader?.downloadFail(key: context.key, error: .unacceptableStatusCode(response.statusCode))
+            return
+        }
+
+        if context.mimeType == nil {
+            context.mimeType = response.mimeType
+        }
+        if let fileSize = try? temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+            context.fileSize = Int64(fileSize)
+        }
+
+        do {
+            let localURL = try persistDownloadedFile(from: temporaryURL)
+            downloader?.downloadSuccess(key: context.key, result: .init(localURL: localURL, fileSize: context.fileSize, mimeType: context.mimeType))
+        } catch {
+            downloader?.downloadFail(key: context.key, error: .underlying(error))
+        }
+    }
+
+    func didComplete(with error: Error?) {
+        guard let error else { return }
+        defer {
+            clearTask()
+            finish()
+        }
+        guard !isCancelled else { return }
+
+        if let urlError = error as? URLError {
+            downloader?.downloadFail(key: context.key, error: .network(urlError))
+        } else {
+            downloader?.downloadFail(key: context.key, error: .underlying(error))
+        }
     }
     
     private func persistDownloadedFile(from temporaryURL: URL) throws -> URL {
-        let destinationURL = context.destinationURL
+        let moduleSaveURL = context.moduleSaveURL
         let fileManager = FileManager.default
 
         try fileManager.createDirectory(
-            at: destinationURL.deletingLastPathComponent(),
+            at: moduleSaveURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
 
-        if fileManager.fileExists(atPath: destinationURL.path) {
-            try fileManager.removeItem(at: destinationURL)
+        if fileManager.fileExists(atPath: moduleSaveURL.path) {
+            try fileManager.removeItem(at: moduleSaveURL)
         }
 
-        try fileManager.moveItem(at: temporaryURL, to: destinationURL)
-        return destinationURL
+        try fileManager.moveItem(at: temporaryURL, to: moduleSaveURL)
+        return moduleSaveURL
     }
 }

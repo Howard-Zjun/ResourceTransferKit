@@ -13,7 +13,8 @@ final class DownloadContext {
     
     let key: ResourceKey
     
-    var destinationURL: URL
+    /// 模块资源保存路径
+    var moduleSaveURL: URL
     
     var subscribers: [DownloadSubscriber]
     
@@ -22,6 +23,8 @@ final class DownloadContext {
     var effectivePriority: RequestPriority
     
     let creationTime: Date
+    
+    var startDownloadTime: Date?
     
     var progress: Float? {
         didSet {
@@ -39,7 +42,7 @@ final class DownloadContext {
             }
             
             let resourceType = UTType(mimeType: mimeType)
-            let filename = destinationURL
+            let filename = moduleSaveURL
                 .deletingPathExtension()
                 .lastPathComponent
             let directoryName = resourceType.map {
@@ -53,19 +56,19 @@ final class DownloadContext {
                 .appendingPathComponent(filename)
             if let pathExtension = resourceType?.preferredFilenameExtension {
                 updatedURL = updatedURL.appendingPathExtension(pathExtension)
-            } else if !destinationURL.pathExtension.isEmpty {
-                updatedURL = updatedURL.appendingPathExtension(destinationURL.pathExtension)
+            } else if !moduleSaveURL.pathExtension.isEmpty {
+                updatedURL = updatedURL.appendingPathExtension(moduleSaveURL.pathExtension)
             }
-            destinationURL = updatedURL
+            moduleSaveURL = updatedURL
         }
     }
     
     var fileSize: Int64?
     
-    init(request: ResourceRequest, imgV: UIImageView, priority: RequestPriority) {
+    init(request: ResourceRequest, subscriber: DownloadResultSubscriber, priority: RequestPriority) {
         self.key = request.key
-        self.destinationURL = Self.defaultSavePath(for: request.url)
-        self.subscribers = [.init(request: request, subscriberImageView: imgV)]
+        self.moduleSaveURL = Self.defaultSavePath(for: request.url)
+        self.subscribers = [.init(request: request, resultSubscriber: subscriber)]
         self.effectivePriority = priority
         creationTime = .init()
     }
@@ -120,20 +123,10 @@ class DownloadSubscriber {
     
     let request: ResourceRequest
     
-    weak var subscriberImageView: UIImageView?
+    let resultSubscriber: DownloadResultSubscriber
     
-    init(request: ResourceRequest, subscriberImageView: UIImageView? = nil) {
+    init(request: ResourceRequest, resultSubscriber: DownloadResultSubscriber) {
         self.request = request
-        self.subscriberImageView = subscriberImageView
-    }
-}
-
-enum RequestPriority: Int, Comparable {
-    case low
-    case normal
-    case high
-    
-    static func < (lhs: RequestPriority, rhs: RequestPriority) -> Bool {
-        lhs.rawValue < rhs.rawValue
+        self.resultSubscriber = resultSubscriber
     }
 }

@@ -7,34 +7,66 @@
 
 import UIKit
 
-// MARK: - 请求参数封装
-struct ResourceRequest {
+public enum RequestPriority: Int, Comparable {
+    case low
+    case normal
+    case high
     
-    var key: ResourceKey {
+    public static func < (lhs: RequestPriority, rhs: RequestPriority) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+}
+
+// MARK: - 请求参数封装
+public struct ResourceRequest {
+    
+    public var key: ResourceKey {
         .init(url: url)
     }
     
-    let url: URL
+    public let url: URL
     
-    let initialPriority: RequestPriority
+    /// 自定义保存路径
+    public let customSavePath: URL?
     
-    let completion: ((ResourceDownloadResult) -> Void)?
+    /// 初始化优先级
+    public let initialPriority: RequestPriority
     
-    let errorBlock: ((ResourceTransferError) -> Void)?
+    public let completion: ((ResourceDownloadResult) -> Void)?
     
-    let progressBlock: ((Float) -> Void)?
+    public let errorBlock: ((ResourceTransferError) -> Void)?
     
-    init(
+    public let progressBlock: ((Float) -> Void)?
+    
+    public init(
         url: URL,
+        customSavePath: URL? = nil,
         priority: RequestPriority = .normal,
         completion: ((ResourceDownloadResult) -> Void)? = nil,
         errorBlock: ((ResourceTransferError) -> Void)? = nil,
         progressBlock: ((Float) -> Void)? = nil
     ) {
         self.url = url
+        self.customSavePath = customSavePath
         self.initialPriority = priority
         self.completion = completion
         self.errorBlock = errorBlock
         self.progressBlock = progressBlock
+    }
+}
+
+// MARK: - 便捷式开启下载
+extension ResourceRequest {
+    
+    public func startLoad() {
+        ResourceScheduler.default.load(request: self, subscriber: DownloadResultSubscriber())
+    }
+}
+
+// MARK: - 便捷式取消下载
+extension ResourceRequest {
+    
+    public func cancel() {
+        ResourceScheduler.default.cancel(key: key)
     }
 }
