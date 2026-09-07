@@ -14,6 +14,9 @@ public final class ResourceScheduler: NSObject {
     
     /// 等待队列
     private var waitingContexts: [ResourceKey: DownloadContext] = [:]
+
+    /// 正在等待重试间隔结束的任务。
+    private var retryingContexts: [ResourceKey: DownloadContext] = [:]
     
     private let lock: NSLock = .init()
 
@@ -58,11 +61,14 @@ extension ResourceScheduler {
         lock.lock()
         defer { lock.unlock() }
         
-        if let context = downloadingContexts[request.key] ?? waitingContexts[request.key] {
+        if let context = downloadingContexts[request.key]
+            ?? waitingContexts[request.key]
+            ?? retryingContexts[request.key] {
             context.subscribers.removeAll { $0.request.identifier == request.identifier }
             if context.subscribers.isEmpty {
                 waitingContexts.removeValue(forKey: request.key)
                 downloadingContexts.removeValue(forKey: request.key)
+                retryingContexts.removeValue(forKey: request.key)
                 context.state = .cancelled
                 context.operation?.cancel()
             } else {
@@ -78,6 +84,7 @@ extension ResourceScheduler {
         
         removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
         removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
+        removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
         startWaitingContextsIfPossible()
     }
 }
@@ -94,9 +101,12 @@ extension ResourceScheduler {
         // 1. 当前订阅者若已订阅其他资源，先解除旧订阅。
         removeSubscriber(subscriber, exceptFor: request.key, from: &waitingContexts)
         removeSubscriber(subscriber, exceptFor: request.key, from: &downloadingContexts)
+        removeSubscriber(subscriber, exceptFor: request.key, from: &retryingContexts)
 
         // 2. 命中相同资源时，共用已有任务；等待中的任务还会提升到最高订阅优先级。
-        if let context = downloadingContexts[request.key] ?? waitingContexts[request.key] {
+        if let context = downloadingContexts[request.key]
+            ?? waitingContexts[request.key]
+            ?? retryingContexts[request.key] {
             context.subscribers.append(
                 DownloadSubscriber(request: request, resultSubscriber: subscriber)
             )
@@ -131,6 +141,24 @@ extension ResourceScheduler {
             }
             return lhs.creationTime > rhs.creationTime
         }
+    }
+
+    private func retryDelay(for failRetryCount: Int) -> TimeInterval {
+        let exponent = min(max(failRetryCount - 1, 0), 3)
+        return TimeInterval(1 << exponent)
+    }
+
+    private func enqueueRetry(key: ResourceKey, context: DownloadContext) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let retryingContext = retryingContexts[key], retryingContext === context else {
+            return
+        }
+        retryingContexts.removeValue(forKey: key)
+        context.state = .waiting
+        waitingContexts[key] = context
+        startWaitingContextsIfPossible()
     }
     
     private func removeSubscriber(
@@ -260,7 +288,11 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         }
         if !context.subscribers.isEmpty {
             context.state = .retrying(failRetryCount: context.failRetryCount)
-            waitingContexts[key] = context
+            retryingContexts[key] = context
+            let retryDelay = retryDelay(for: context.failRetryCount)
+            DispatchQueue.global().asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+                self?.enqueueRetry(key: key, context: context)
+            }
         } else {
             context.state = .failed(error)
         }
