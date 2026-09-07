@@ -7,21 +7,21 @@
 
 import UIKit
 
-// MARK: - 图片便捷设置入口
+// MARK: - 图片便捷式入口
 extension UIImageView {
     
     public func rt_load(
         resourceURL: URL,
-        completion: ((URL) -> Void)? = nil,
+        completion: ((ResourceDownloadResult) -> Void)? = nil,
         errorBlock: ((Error) -> Void)? = nil
     ) {
-        let request = ImageResourceRequest(url: resourceURL) { [weak self] localResourceURL in
+        let request = ResourceRequest(url: resourceURL, priority: .high) { [weak self] result in
             do {
-                let data = try Data(contentsOf: localResourceURL, options: [])
+                let data = try Data(contentsOf: result.localURL, options: [])
                 if let image = UIImage(data: data) {
                     Task { @MainActor in
                         self?.image = image
-                        completion?(localResourceURL)
+                        completion?(result)
                     }
                 }
             } catch {
@@ -34,10 +34,10 @@ extension UIImageView {
                 errorBlock?(error)
             }
         }
-        ImageResourceDownloader.default.load(imageRequest: request, imageView: self)
+        ResourceScheduler.default.load(request: request, subscriber: DownloadResultImageSubscriber(imageView: self))
     }
     
     public func rt_cancel() {
-        ImageResourceDownloader.default.cancel(imageView: self)
+        ResourceScheduler.default.cancel(subscriber: DownloadResultImageSubscriber(imageView: self))
     }
 }
