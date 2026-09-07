@@ -62,18 +62,22 @@ public struct ResourceRequest {
     }
 }
 
-// MARK: - 便捷式开启下载
+// MARK: - 便捷式入口
 extension ResourceRequest {
     
     public func startLoad() {
         ResourceScheduler.default.load(request: self, subscriber: DownloadResultSubscriber())
     }
-}
-
-// MARK: - 便捷式取消下载
-extension ResourceRequest {
     
     public func cancel() {
         ResourceScheduler.default.cancel(request: self)
+    }
+    
+    public func pause() {
+        // TODO: - 阶段5开发
+    }
+    
+    public func resume(){
+        // TODO: - 阶段5开发
     }
 }

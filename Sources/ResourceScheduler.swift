@@ -63,6 +63,7 @@ extension ResourceScheduler {
             if context.subscribers.isEmpty {
                 waitingContexts.removeValue(forKey: request.key)
                 downloadingContexts.removeValue(forKey: request.key)
+                context.state = .cancelled
                 context.operation?.cancel()
             } else {
                 context.effectivePriority = context.subscribers.map { $0.request.initialPriority }.max() ?? .normal
@@ -118,6 +119,7 @@ extension ResourceScheduler {
               let context = nextWaitingContext() {
             waitingContexts.removeValue(forKey: context.key)
             downloadingContexts[context.key] = context
+            context.state = .downloading(progress: context.progress ?? 0)
             downloader.addDownload(context: context)
         }
     }
@@ -146,6 +148,7 @@ extension ResourceScheduler {
 
         for key in keysToRemove {
             let context = contexts.removeValue(forKey: key)
+            context?.state = .cancelled
             context?.operation?.cancel()
         }
     }
@@ -172,6 +175,7 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         }
         let progress = Float(bytesWritten) / Float(expectedBytes)
         context.progress = progress
+        context.state = .downloading(progress: progress)
         let subscribers = context.subscribers
         lock.unlock()
         Task { @MainActor in
@@ -188,7 +192,12 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
     
     func downloadSuccess(key: ResourceKey, result: ResourceDownloadResult) {
         lock.lock()
-        let subscribers = downloadingContexts.removeValue(forKey: key)?.subscribers ?? []
+        guard let context = downloadingContexts.removeValue(forKey: key) else {
+            lock.unlock()
+            return
+        }
+        context.state = .completed
+        let subscribers = context.subscribers
         startWaitingContextsIfPossible()
         lock.unlock()
 
@@ -250,7 +259,10 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
             !error.isRetryable || context.failRetryCount > $0.request.maxFailRetryCount
         }
         if !context.subscribers.isEmpty {
+            context.state = .retrying(failRetryCount: context.failRetryCount)
             waitingContexts[key] = context
+        } else {
+            context.state = .failed(error)
         }
         startWaitingContextsIfPossible()
         lock.unlock()
