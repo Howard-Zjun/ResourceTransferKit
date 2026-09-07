@@ -238,10 +238,10 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
 
         context.failRetryCount += 1
         let failedSubscribers = context.subscribers.filter {
-            context.failRetryCount > $0.request.maxFailRetryCount
+            !error.isRetryable || context.failRetryCount > $0.request.maxFailRetryCount
         }
         context.subscribers.removeAll {
-            context.failRetryCount > $0.request.maxFailRetryCount
+            !error.isRetryable || context.failRetryCount > $0.request.maxFailRetryCount
         }
         if !context.subscribers.isEmpty {
             waitingContexts[key] = context
