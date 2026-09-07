@@ -34,41 +34,50 @@ public struct ResourceRequest {
     /// 初始化优先级
     public let initialPriority: RequestPriority
     
-    public let completion: ((ResourceDownloadResult) -> Void)?
+    /// 同一个资源失败后允许重新进入调度队列的最大次数，范围为 0...5，默认值为 3。
+    public let maxFailRetryCount: Int
     
-    public let errorBlock: ((ResourceTransferError) -> Void)?
+    public let completion: (@MainActor (ResourceDownloadResult) -> Void)?
     
-    public let progressBlock: ((Float) -> Void)?
+    public let errorBlock: (@MainActor (ResourceTransferError) -> Void)?
+    
+    public let progressBlock: (@MainActor (Float) -> Void)?
     
     public init(
         url: URL,
         customSavePath: URL? = nil,
         priority: RequestPriority = .normal,
-        completion: ((ResourceDownloadResult) -> Void)? = nil,
-        errorBlock: ((ResourceTransferError) -> Void)? = nil,
-        progressBlock: ((Float) -> Void)? = nil
+        maxFailRetryCount: Int = 3,
+        completion: (@MainActor (ResourceDownloadResult) -> Void)? = nil,
+        errorBlock: (@MainActor (ResourceTransferError) -> Void)? = nil,
+        progressBlock: (@MainActor (Float) -> Void)? = nil
     ) {
         self.url = url
         self.customSavePath = customSavePath
         self.initialPriority = priority
+        self.maxFailRetryCount = min(max(0, maxFailRetryCount), 5)
         self.completion = completion
         self.errorBlock = errorBlock
         self.progressBlock = progressBlock
     }
 }
 
-// MARK: - 便捷式开启下载
+// MARK: - 便捷式入口
 extension ResourceRequest {
     
     public func startLoad() {
         ResourceScheduler.default.load(request: self, subscriber: DownloadResultSubscriber())
     }
-}
-
-// MARK: - 便捷式取消下载
-extension ResourceRequest {
     
     public func cancel() {
         ResourceScheduler.default.cancel(request: self)
+    }
+    
+    public func pause() {
+        // TODO: - 阶段5开发
+    }
+    
+    public func resume(){
+        // TODO: - 阶段5开发
     }
 }

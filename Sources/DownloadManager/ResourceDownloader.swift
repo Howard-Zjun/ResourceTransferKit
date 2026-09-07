@@ -138,6 +138,43 @@ public enum ResourceTransferError: Error, LocalizedError {
     case missingDownloadedFile
     case underlying(Error)
 
+    /// 是否适合由调度器自动重新发起下载。
+    public var isRetryable: Bool {
+        switch self {
+        case let .network(error):
+            switch error.code {
+            case .timedOut,
+                    .networkConnectionLost,
+                    .cannotConnectToHost,
+                    .cannotFindHost,
+                    .dnsLookupFailed,
+                    .notConnectedToInternet:
+                return true
+            default:
+                return false
+            }
+        case let .unacceptableStatusCode(statusCode):
+            switch statusCode {
+            case 408: // 请求超时
+                return true
+            case 429: // 请求过于频繁
+                return true
+            case 500: // 服务器内部错误
+                return true
+            case 502: // 网关错误
+                return true
+            case 503: // 服务暂时不可用
+                return true
+            case 504: // 网关超时
+                return true
+            default:
+                return false
+            }
+        case .invalidURL, .invalidResponse, .missingDownloadedFile, .underlying:
+            return false
+        }
+    }
+
     public var errorDescription: String? {
         switch self {
         case let .invalidURL(url):

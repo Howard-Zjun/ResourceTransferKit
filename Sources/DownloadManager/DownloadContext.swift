@@ -26,6 +26,11 @@ final class DownloadContext {
     
     var startDownloadTime: Date?
     
+    /// 当前资源任务已消耗的失败重试次数，所有订阅者共享。
+    var failRetryCount: Int = 0
+    
+    var state: TransferState = .waiting
+    
     var progress: Float?
     
     var mimeType: String? {
