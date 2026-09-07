@@ -174,7 +174,9 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         context.progress = progress
         let subscribers = context.subscribers
         lock.unlock()
-        subscribers.forEach { $0.request.progressBlock?(progress) }
+        Task { @MainActor in
+            subscribers.forEach { $0.request.progressBlock?(progress) }
+        }
     }
     
     func downloadMaxQueueChange() {
@@ -191,7 +193,8 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         lock.unlock()
 
         var copies: [URL: Result<Void, Error>] = [:]
-        var notifications: [() -> Void] = []
+        var failedSubscribers: [(DownloadSubscriber, ResourceTransferError)] = []
+        var completedSubscribers: [DownloadSubscriber] = []
         let fileManager = FileManager.default
         for subscriber in subscribers {
             do {
@@ -221,12 +224,15 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
                     }
                 }
             } catch {
-                notifications.append { subscriber.request.errorBlock?(.underlying(error)) }
+                failedSubscribers.append((subscriber, .underlying(error)))
                 continue
             }
-            notifications.append { subscriber.request.completion?(result) }
+            completedSubscribers.append(subscriber)
         }
-        notifications.forEach { $0() }
+        Task { @MainActor in
+            failedSubscribers.forEach { $0.0.request.errorBlock?($0.1) }
+            completedSubscribers.forEach { $0.request.completion?(result) }
+        }
     }
     
     func downloadFail(key: ResourceKey, error: ResourceTransferError) {
@@ -249,8 +255,8 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         startWaitingContextsIfPossible()
         lock.unlock()
 
-        failedSubscribers.forEach { subscriber in
-            subscriber.request.errorBlock?(error)
+        Task { @MainActor in
+            failedSubscribers.forEach { $0.request.errorBlock?(error) }
         }
     }
 }

@@ -37,20 +37,20 @@ public struct ResourceRequest {
     /// 同一个资源失败后允许重新进入调度队列的最大次数，范围为 0...5，默认值为 3。
     public let maxFailRetryCount: Int
     
-    public let completion: ((ResourceDownloadResult) -> Void)?
+    public let completion: (@MainActor (ResourceDownloadResult) -> Void)?
     
-    public let errorBlock: ((ResourceTransferError) -> Void)?
+    public let errorBlock: (@MainActor (ResourceTransferError) -> Void)?
     
-    public let progressBlock: ((Float) -> Void)?
+    public let progressBlock: (@MainActor (Float) -> Void)?
     
     public init(
         url: URL,
         customSavePath: URL? = nil,
         priority: RequestPriority = .normal,
         maxFailRetryCount: Int = 3,
-        completion: ((ResourceDownloadResult) -> Void)? = nil,
-        errorBlock: ((ResourceTransferError) -> Void)? = nil,
-        progressBlock: ((Float) -> Void)? = nil
+        completion: (@MainActor (ResourceDownloadResult) -> Void)? = nil,
+        errorBlock: (@MainActor (ResourceTransferError) -> Void)? = nil,
+        progressBlock: (@MainActor (Float) -> Void)? = nil
     ) {
         self.url = url
         self.customSavePath = customSavePath
