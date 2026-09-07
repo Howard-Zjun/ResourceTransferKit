@@ -231,11 +231,25 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
     
     func downloadFail(key: ResourceKey, error: ResourceTransferError) {
         lock.lock()
-        let subscribers = downloadingContexts.removeValue(forKey: key)?.subscribers ?? []
+        guard let context = downloadingContexts.removeValue(forKey: key) else {
+            lock.unlock()
+            return
+        }
+
+        context.failRetryCount += 1
+        let failedSubscribers = context.subscribers.filter {
+            context.failRetryCount > $0.request.maxFailRetryCount
+        }
+        context.subscribers.removeAll {
+            context.failRetryCount > $0.request.maxFailRetryCount
+        }
+        if !context.subscribers.isEmpty {
+            waitingContexts[key] = context
+        }
         startWaitingContextsIfPossible()
         lock.unlock()
 
-        subscribers.forEach { subscriber in
+        failedSubscribers.forEach { subscriber in
             subscriber.request.errorBlock?(error)
         }
     }
