@@ -154,9 +154,22 @@ public enum ResourceTransferError: Error, LocalizedError {
                 return false
             }
         case let .unacceptableStatusCode(statusCode):
-            return statusCode == 408 // 408 表示请求超时
-            || statusCode == 429 // 429 表示请求过于频繁，二者均可能在稍后恢复。
-            || (500...599).contains(statusCode)
+            switch statusCode {
+            case 408: // 请求超时
+                return true
+            case 429: // 请求过于频繁
+                return true
+            case 500: // 服务器内部错误
+                return true
+            case 502: // 网关错误
+                return true
+            case 503: // 服务暂时不可用
+                return true
+            case 504: // 网关超时
+                return true
+            default:
+                return false
+            }
         case .invalidURL, .invalidResponse, .missingDownloadedFile, .underlying:
             return false
         }
