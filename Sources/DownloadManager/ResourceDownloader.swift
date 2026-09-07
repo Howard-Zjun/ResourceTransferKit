@@ -10,7 +10,7 @@ import UIKit
 
 protocol ResourceDownloaderDelegate: NSObjectProtocol {
     
-    func contextFromDownloading(key: ResourceKey) -> DownloadContext?
+    func downloadProgress(key: ResourceKey, mimeType: String?, bytesWritten: Int64, expectedBytes: Int64)
     
     func downloadMaxQueueChange()
     
@@ -114,21 +114,15 @@ extension ResourceDownloader: URLSessionDownloadDelegate {
     }
 
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard let url = downloadTask.originalRequest?.url,
-              let context = schedulerDelegate?.contextFromDownloading(key: .init(url: url)) else {
+        guard let url = downloadTask.originalRequest?.url else {
             return
         }
-
-        if context.startDownloadTime == nil {
-            context.startDownloadTime = .init()
-        }
-        if context.mimeType == nil {
-            context.mimeType = downloadTask.response?.mimeType
-        }
-        context.fileSize = totalBytesWritten
-        if totalBytesExpectedToWrite > 0 {
-            context.progress = Float(totalBytesWritten) / Float(totalBytesExpectedToWrite)
-        }
+        schedulerDelegate?.downloadProgress(
+            key: .init(url: url),
+            mimeType: downloadTask.response?.mimeType,
+            bytesWritten: totalBytesWritten,
+            expectedBytes: totalBytesExpectedToWrite
+        )
     }
 
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {

@@ -26,14 +26,7 @@ final class DownloadContext {
     
     var startDownloadTime: Date?
     
-    var progress: Float? {
-        didSet {
-            guard let progress else { return }
-            subscribers.forEach { subscriber in
-                subscriber.request.progressBlock?(progress)
-            }
-        }
-    }
+    var progress: Float?
     
     var mimeType: String? {
         didSet {

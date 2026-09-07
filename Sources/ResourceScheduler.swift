@@ -26,6 +26,20 @@ public final class ResourceScheduler: NSObject {
     }()
     
     public static let `default`: ResourceScheduler = .init()
+
+    public var maxDownloadCount: Int {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return downloader.maxDownloadCount
+        }
+        set {
+            lock.lock()
+            let downloader = downloader
+            lock.unlock()
+            downloader.maxDownloadCount = newValue
+        }
+    }
     
     private override init() {
         configuration = .default
@@ -40,13 +54,19 @@ public final class ResourceScheduler: NSObject {
 
 extension ResourceScheduler {
     
-    func cancel(key: ResourceKey) {
+    func cancel(request: ResourceRequest) {
         lock.lock()
         defer { lock.unlock() }
         
-        waitingContexts.removeValue(forKey: key)
-        if let context = downloadingContexts.removeValue(forKey: key) {
-            context.operation?.cancel()
+        if let context = downloadingContexts[request.key] ?? waitingContexts[request.key] {
+            context.subscribers.removeAll { $0.request.identifier == request.identifier }
+            if context.subscribers.isEmpty {
+                waitingContexts.removeValue(forKey: request.key)
+                downloadingContexts.removeValue(forKey: request.key)
+                context.operation?.cancel()
+            } else {
+                context.effectivePriority = context.subscribers.map { $0.request.initialPriority }.max() ?? .normal
+            }
         }
         startWaitingContextsIfPossible()
     }
@@ -133,11 +153,28 @@ extension ResourceScheduler {
 
 extension ResourceScheduler: ResourceDownloaderDelegate {
     
-    func contextFromDownloading(key: ResourceKey) -> DownloadContext? {
+    func downloadProgress(key: ResourceKey, mimeType: String?, bytesWritten: Int64, expectedBytes: Int64) {
         lock.lock()
-        defer { lock.unlock() }
-        
-        return downloadingContexts[key]
+        guard let context = downloadingContexts[key] else {
+            lock.unlock()
+            return
+        }
+        if context.startDownloadTime == nil {
+            context.startDownloadTime = .init()
+        }
+        if context.mimeType == nil {
+            context.mimeType = mimeType
+        }
+        context.fileSize = bytesWritten
+        guard expectedBytes > 0 else {
+            lock.unlock()
+            return
+        }
+        let progress = Float(bytesWritten) / Float(expectedBytes)
+        context.progress = progress
+        let subscribers = context.subscribers
+        lock.unlock()
+        subscribers.forEach { $0.request.progressBlock?(progress) }
     }
     
     func downloadMaxQueueChange() {
@@ -160,6 +197,11 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
             do {
                 if let path = subscriber.request.customSavePath,
                    path.standardizedFileURL != result.localURL.standardizedFileURL {
+                    var isDirectory: ObjCBool = false
+                    let exists = fileManager.fileExists(atPath: path.path, isDirectory: &isDirectory)
+                    guard path.isFileURL, !path.hasDirectoryPath, !(exists && isDirectory.boolValue) else {
+                        throw CocoaError(.fileWriteInvalidFileName)
+                    }
                     let destination = path.standardizedFileURL
                     if let copy = copies[destination] {
                         try copy.get()

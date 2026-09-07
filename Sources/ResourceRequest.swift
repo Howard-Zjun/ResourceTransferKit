@@ -19,6 +19,8 @@ public enum RequestPriority: Int, Comparable {
 
 // MARK: - 请求参数封装
 public struct ResourceRequest {
+
+    let identifier = UUID()
     
     public var key: ResourceKey {
         .init(url: url)
@@ -67,6 +69,6 @@ extension ResourceRequest {
 extension ResourceRequest {
     
     public func cancel() {
-        ResourceScheduler.default.cancel(key: key)
+        ResourceScheduler.default.cancel(request: self)
     }
 }
