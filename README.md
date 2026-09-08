@@ -1,0 +1,143 @@
+# ResourceTransferKit
+
+`ResourceTransferKit` 是一个面向 iOS 15.6+ 的资源下载与磁盘缓存模块，用于图片、音频、视频、PDF、ZIP 和其他文件的下载。模块负责请求去重、优先级调度、并发限制、进度回调、失败重试、取消以及磁盘缓存管理。
+
+## 集成
+
+当前可通过本地 CocoaPods 路径集成：
+
+```ruby
+target 'YourApp' do
+  use_frameworks!
+  pod 'ResourceTransferKit', :path => '../ResourceTransferKit'
+end
+```
+
+执行 `pod install` 后，在需要使用的文件中导入模块：
+
+```swift
+import ResourceTransferKit
+```
+
+## 模块流程
+
+```mermaid
+flowchart TD
+    A[ResourceRequest.startLoad] --> B[ResourceScheduler]
+    B --> C{CacheStore 命中且文件存在?}
+    C -- 是 --> D[更新 lastAccessDate]
+    D --> E[可选复制到 customSavePath]
+    E --> F[主线程 completion]
+    C -- 否 --> G[按优先级进入等待队列]
+    G --> H[受并发上限约束的 DownloadOperation]
+    H --> I[URLSession 下载到临时文件]
+    I --> J[移动到 CacheStore 管理的缓存文件]
+    J --> K[写入 CacheMetadata]
+    K --> L[先删除无元数据文件，再执行过期与 LRU 清理]
+    L --> E
+```
+
+### 调度规则
+
+- 同一完整 URL 的并发请求共用同一个下载任务；后加入的请求会合并为订阅者。
+- 请求优先级分为 `.low`、`.normal`、`.high`；等待队列优先处理更高优先级请求，同优先级按创建时间排序。
+- `ResourceScheduler.default.maxDownloadCount` 的可设置范围是 `3...7`，默认值为 `5`。
+- 可重试的网络错误和 HTTP `408`、`429`、`500`、`502`、`503`、`504` 会自动重试；每个请求可设置 `maxFailRetryCount`，范围为 `0...5`，默认 `3` 次。
+- 所有 `completion`、`errorBlock`、`progressBlock` 都在主线程执行。
+
+### 磁盘缓存规则
+
+- 缓存根目录为应用沙盒的 `Library/Caches/ResourceTransferKit/Cache`。
+- 缓存文件名由资源完整 URL 的 SHA-256 标识生成；元数据统一保存在 `metadata.json`。
+- `CacheMetadata` 记录资源键、MIME type、文件大小和最近访问时间；只有元数据与对应缓存文件都存在时才视为命中。
+- 默认最大磁盘占用为 `300 MB`，超过上限后按最近最少使用（LRU）清理到 `80%` 的目标值。
+- 默认缓存有效期为 7 天。每次保存时会优先删除没有元数据记录的普通文件，随后删除过期资源并执行 LRU 清理。
+- 使用 `CacheStore.default.removeAll()` 可清空模块的全部磁盘缓存。
+
+## 使用方法
+
+### 下载任意资源
+
+```swift
+let url = URL(string: "https://example.com/media/video.mp4")!
+
+let request = ResourceRequest(
+    url: url,
+    priority: .high,
+    maxFailRetryCount: 3,
+    completion: { result in
+        print("缓存文件：\(result.localURL)")
+        print("大小：\(result.fileSize ?? 0)")
+        print("类型：\(result.expectedType)")
+    },
+    errorBlock: { error in
+        print("下载失败：\(error.localizedDescription)")
+    },
+    progressBlock: { progress in
+        print("进度：\(Int(progress * 100))%")
+    }
+)
+
+request.startLoad()
+```
+
+`ResourceDownloadResult.localURL` 始终指向模块管理的缓存文件，可直接用来读取、播放或复制资源。
+
+### 保存一份到业务目录
+
+传入 `customSavePath` 后，模块在下载成功或缓存命中时都会复制一份文件到指定位置；回调中的 `result.localURL` 仍是模块缓存文件地址。
+
+```swift
+let cacheURL = URL(string: "https://example.com/files/report.pdf")!
+let documentsURL = FileManager.default.urls(
+    for: .documentDirectory,
+    in: .userDomainMask
+)[0]
+let destinationURL = documentsURL.appendingPathComponent("report.pdf")
+
+let request = ResourceRequest(
+    url: cacheURL,
+    customSavePath: destinationURL,
+    completion: { result in
+        print("缓存：\(result.localURL)")
+        print("业务副本：\(destinationURL)")
+    }
+)
+request.startLoad()
+```
+
+### 取消请求
+
+保留发起下载的同一个 `ResourceRequest`，再调用 `cancel()`；重新创建一个相同 URL 的请求并不能取消原订阅。
+
+```swift
+request.cancel()
+```
+
+当同一资源仍有其他订阅者时，取消只移除当前订阅；没有任何订阅者时，底层下载任务会被取消。
+
+### 加载 UIImageView
+
+```swift
+imageView.rt_load(
+    resourceURL: URL(string: "https://example.com/images/cover.jpg")!,
+    completion: { result in
+        print("图片文件：\(result.localURL)")
+    },
+    errorBlock: { error in
+        print("图片加载失败：\(error.localizedDescription)")
+    }
+)
+
+// 视图复用或离开页面时取消。
+imageView.rt_cancel()
+```
+
+`rt_load` 使用高优先级请求，并通过 `ResourceScheduler` 统一处理缓存命中和旧请求取消，避免旧下载结果覆盖新图片。
+
+### 调整并发量与清空缓存
+
+```swift
+ResourceScheduler.default.maxDownloadCount = 4
+CacheStore.default.removeAll()
+```
