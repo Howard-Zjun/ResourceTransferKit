@@ -21,6 +21,8 @@ public final class ResourceScheduler: NSObject {
     private let lock: NSLock = .init()
 
     private let configuration: URLSessionConfiguration
+
+    private let cacheStore: CacheStore
     
     private lazy var downloader: ResourceDownloader = {
         let result = ResourceDownloader(configuration: self.configuration)
@@ -46,13 +48,19 @@ public final class ResourceScheduler: NSObject {
     
     private override init() {
         configuration = .default
+        cacheStore = .default
         super.init()
     }
 
+    // MARK: - Unit Test
+    #if DEBUG
+    /// 仅供测试注入 URLProtocol 配置，Release 环境只允许使用 ResourceScheduler.default。
     init(configuration: URLSessionConfiguration) {
         self.configuration = configuration
+        cacheStore = .default
         super.init()
     }
+    #endif
 }
 
 extension ResourceScheduler {
@@ -95,6 +103,58 @@ extension ResourceScheduler {
 extension ResourceScheduler {
     
     func load(request: ResourceRequest, subscriber: DownloadResultSubscriber) {
+        if let cacheResult = cacheStore.load(request: request) {
+            let result = ResourceDownloadResult(
+                localURL: cacheResult.localURL,
+                fileSize: cacheResult.fileSize,
+                mimeType: cacheResult.mimeType
+            )
+            if let path = request.customSavePath,
+               path.standardizedFileURL != result.localURL.standardizedFileURL {
+                do {
+                    var isDirectory: ObjCBool = false
+                    let exists = FileManager.default.fileExists(
+                        atPath: path.path,
+                        isDirectory: &isDirectory
+                    )
+                    guard path.isFileURL, !path.hasDirectoryPath,
+                          !(exists && isDirectory.boolValue) else {
+                        throw CocoaError(.fileWriteInvalidFileName)
+                    }
+                    let destination = path.standardizedFileURL
+                    try FileManager.default.createDirectory(
+                        at: destination.deletingLastPathComponent(),
+                        withIntermediateDirectories: true
+                    )
+                    if FileManager.default.fileExists(atPath: destination.path) {
+                        try FileManager.default.removeItem(at: destination)
+                    }
+                    try FileManager.default.copyItem(at: result.localURL, to: destination)
+                } catch {
+                    lock.lock()
+                    removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
+                    removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
+                    removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
+                    startWaitingContextsIfPossible()
+                    lock.unlock()
+                    Task { @MainActor in
+                        request.errorBlock?(.underlying(error))
+                    }
+                    return
+                }
+            }
+            lock.lock()
+            removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
+            removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
+            removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
+            startWaitingContextsIfPossible()
+            lock.unlock()
+            Task { @MainActor in
+                request.completion?(result)
+            }
+            return
+        }
+
         lock.lock()
         defer { lock.unlock() }
 
@@ -115,7 +175,11 @@ extension ResourceScheduler {
         }
 
         // 3. 首次请求先进入等待队列；仅在有下载槽位时创建 operation。
-        let context = DownloadContext(request: request, subscriber: subscriber, priority: request.initialPriority)
+        let context = DownloadContext(
+            request: request,
+            subscriber: subscriber,
+            priority: request.initialPriority
+        )
         waitingContexts[request.key] = context
         startWaitingContextsIfPossible()
     }
@@ -229,6 +293,11 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         startWaitingContextsIfPossible()
         lock.unlock()
 
+        let cachedResult = (try? cacheStore.save(
+            key: key,
+            downloadResult: result
+        )) ?? result
+
         var copies: [URL: Result<Void, Error>] = [:]
         var failedSubscribers: [(DownloadSubscriber, ResourceTransferError)] = []
         var completedSubscribers: [DownloadSubscriber] = []
@@ -236,7 +305,7 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         for subscriber in subscribers {
             do {
                 if let path = subscriber.request.customSavePath,
-                   path.standardizedFileURL != result.localURL.standardizedFileURL {
+                   path.standardizedFileURL != cachedResult.localURL.standardizedFileURL {
                     var isDirectory: ObjCBool = false
                     let exists = fileManager.fileExists(atPath: path.path, isDirectory: &isDirectory)
                     guard path.isFileURL, !path.hasDirectoryPath, !(exists && isDirectory.boolValue) else {
@@ -254,7 +323,7 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
                             if fileManager.fileExists(atPath: destination.path) {
                                 try fileManager.removeItem(at: destination)
                             }
-                            try fileManager.copyItem(at: result.localURL, to: destination)
+                            try fileManager.copyItem(at: cachedResult.localURL, to: destination)
                         }
                         copies[destination] = copy
                         try copy.get()
@@ -268,7 +337,7 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         }
         Task { @MainActor in
             failedSubscribers.forEach { $0.0.request.errorBlock?($0.1) }
-            completedSubscribers.forEach { $0.request.completion?(result) }
+            completedSubscribers.forEach { $0.request.completion?(cachedResult) }
         }
     }
     
