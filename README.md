@@ -54,6 +54,37 @@ flowchart TD
 - 默认缓存有效期为 7 天。每次保存时会优先删除没有元数据记录的普通文件，随后删除过期资源并执行 LRU 清理。
 - 使用 `CacheStore.default.removeAll()` 可清空模块的全部磁盘缓存。
 
+## 多线程与并发
+
+模块不要求调用方手动管理线程，而是在内部将下载工作、共享状态和 UI 回调分开处理：
+
+| 场景 | 实现方式 | 调用方需要做什么 |
+| --- | --- | --- |
+| 多个资源并行下载 | `ResourceDownloader` 使用 `OperationQueue` 执行 `DownloadOperation`；并发数由 `maxDownloadCount` 限制在 `3...7`。 | 按需要设置 `ResourceScheduler.default.maxDownloadCount`。 |
+| 相同资源的并发请求 | `ResourceScheduler` 以完整 URL 作为资源键，将同一资源的多个请求合并为一个下载上下文。 | 每个调用方照常创建并启动 `ResourceRequest`。 |
+| 调度器共享状态 | 等待、下载和重试队列由 `NSLock` 保护，避免 URLSession 回调与调用方的取消操作并发修改队列。 | 不需要自行加锁。 |
+| 磁盘缓存读写 | `CacheStore` 通过独立的 `NSLock` 串行化元数据和文件清理操作，避免缓存索引与文件状态不一致。 | 不需要自行加锁；不要在模块缓存目录中手动改写文件。 |
+| UI 与业务回调 | 下载进度、成功与失败回调通过 `Task { @MainActor in }` 切回主线程。 | 可以直接更新 UI；耗时的业务处理应再派发到自己的后台任务。 |
+
+例如，同时发起多个资源请求时，模块会在后台受限并发下载；相同 URL 只会建立一个网络任务：
+
+```swift
+let urls = [
+    URL(string: "https://example.com/a.mp4")!,
+    URL(string: "https://example.com/b.mp4")!,
+    URL(string: "https://example.com/a.mp4")!
+]
+
+ResourceScheduler.default.maxDownloadCount = 4
+
+for url in urls {
+    ResourceRequest(url: url) { result in
+        // 在主线程回调；重复的 a.mp4 请求共享同一个下载任务。
+        print(result.localURL)
+    }.startLoad()
+}
+```
+
 ## 使用方法
 
 ### 下载任意资源
