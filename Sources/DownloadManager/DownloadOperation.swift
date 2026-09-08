@@ -163,8 +163,8 @@ extension DownloadOperation {
         }
 
         do {
-            let localURL = try persistDownloadedFile(from: temporaryURL)
-            downloader?.downloadSuccess(key: context.key, result: .init(localURL: localURL, fileSize: context.fileSize, mimeType: context.mimeType))
+            let cacheFileURL = try persistDownloadedFile(from: temporaryURL)
+            downloader?.downloadSuccess(key: context.key, result: .init(localURL: cacheFileURL, fileSize: context.fileSize, mimeType: context.mimeType))
         } catch {
             downloader?.downloadFail(key: context.key, error: .underlying(error))
         }
@@ -186,19 +186,19 @@ extension DownloadOperation {
     }
     
     private func persistDownloadedFile(from temporaryURL: URL) throws -> URL {
-        let moduleSaveURL = context.moduleSaveURL
+        let cacheFileURL = context.cacheFileURL
         let fileManager = FileManager.default
 
         try fileManager.createDirectory(
-            at: moduleSaveURL.deletingLastPathComponent(),
+            at: cacheFileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
 
-        if fileManager.fileExists(atPath: moduleSaveURL.path) {
-            try fileManager.removeItem(at: moduleSaveURL)
+        if fileManager.fileExists(atPath: cacheFileURL.path) {
+            try fileManager.removeItem(at: cacheFileURL)
         }
 
-        try fileManager.moveItem(at: temporaryURL, to: moduleSaveURL)
-        return moduleSaveURL
+        try fileManager.moveItem(at: temporaryURL, to: cacheFileURL)
+        return cacheFileURL
     }
 }
