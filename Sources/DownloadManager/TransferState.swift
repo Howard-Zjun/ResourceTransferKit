@@ -10,6 +10,7 @@ import Foundation
 enum TransferState {
     case waiting
     case downloading(progress: Float)
+    case pausing
     case paused
     case retrying(failRetryCount: Int)
     case completed

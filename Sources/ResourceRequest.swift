@@ -69,15 +69,11 @@ extension ResourceRequest {
         ResourceScheduler.default.load(request: self, subscriber: DownloadResultSubscriber())
     }
     
+    public func pause() {
+        ResourceScheduler.default.pause(request: self)
+    }
+
     public func cancel() {
         ResourceScheduler.default.cancel(request: self)
-    }
-    
-    public func pause() {
-        // TODO: - 阶段5开发
-    }
-    
-    public func resume(){
-        // TODO: - 阶段5开发
     }
 }

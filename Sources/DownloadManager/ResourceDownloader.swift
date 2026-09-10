@@ -136,6 +136,7 @@ public enum ResourceTransferError: Error, LocalizedError {
     case invalidResponse
     case unacceptableStatusCode(Int)
     case missingDownloadedFile
+    case pausingInProgress
     case underlying(Error)
 
     /// 是否适合由调度器自动重新发起下载。
@@ -170,7 +171,7 @@ public enum ResourceTransferError: Error, LocalizedError {
             default:
                 return false
             }
-        case .invalidURL, .invalidResponse, .missingDownloadedFile, .underlying:
+        case .invalidURL, .invalidResponse, .missingDownloadedFile, .pausingInProgress, .underlying:
             return false
         }
     }
@@ -187,6 +188,8 @@ public enum ResourceTransferError: Error, LocalizedError {
             return "服务器返回了 HTTP 状态码 \(code)。"
         case .missingDownloadedFile:
             return "下载完成后未获得本地文件。"
+        case .pausingInProgress:
+            return "下载正在暂停中，请稍后再试。"
         case let .underlying(error):
             return "资源传输失败：\(error.localizedDescription)"
         }
