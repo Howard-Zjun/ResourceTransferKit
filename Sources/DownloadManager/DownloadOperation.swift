@@ -7,10 +7,20 @@
 
 import UIKit
 
+protocol DownloadOperationDelegate: AnyObject {
+
+    var key: ResourceKey { get }
+    func downloadOperationDidAttach(_ operation: DownloadOperation)
+    func downloadOperationResumeData(_ operation: DownloadOperation) -> Data?
+    func downloadOperation(_ operation: DownloadOperation, didFinishDownloadingAt temporaryURL: URL, response: URLResponse?) -> Result<ResourceDownloadResult, ResourceTransferError>
+    func downloadOperationDidDetach(_ operation: DownloadOperation)
+}
+
+
 // MARK: - 下载任务
 class DownloadOperation: Operation, @unchecked Sendable {
 
-    private var context: DownloadContext
+    private weak var context: DownloadOperationDelegate?
 
     private let session: URLSession
 
@@ -21,19 +31,17 @@ class DownloadOperation: Operation, @unchecked Sendable {
 
     private var task: URLSessionDownloadTask?
     
-    private var _isExecuting = false
-
-    private var _isFinished = false
+    override var isAsynchronous: Bool { true }
     
-    override var isAsynchronous: Bool {
-        true
-    }
+    private var _isExecuting = false
     
     override var isExecuting: Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _isExecuting
     }
+    
+    private var _isFinished = false
     
     override var isFinished: Bool {
         stateLock.lock()
@@ -42,7 +50,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
     }
     
     init(
-        context: DownloadContext,
+        context: DownloadOperationDelegate,
         session: URLSession,
         downloader: ResourceDownloader
     ) {
@@ -50,7 +58,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
         self.session = session
         self.downloader = downloader
         super.init()
-        context.operation = self
+        context.downloadOperationDidAttach(self)
     }
     
     override func start() {
@@ -73,8 +81,16 @@ class DownloadOperation: Operation, @unchecked Sendable {
     }
     
     override func main() {
-        let urlRequest = URLRequest(url: context.key.url)
-        let task = session.downloadTask(with: urlRequest)
+        guard let context else {
+            finish()
+            return
+        }
+        let task: URLSessionDownloadTask
+        if let resumeData = context.downloadOperationResumeData(self) {
+            task = session.downloadTask(withResumeData: resumeData)
+        } else {
+            task = session.downloadTask(with: URLRequest(url: context.key.url))
+        }
         resume(task: task)
     }
 
@@ -93,9 +109,31 @@ class DownloadOperation: Operation, @unchecked Sendable {
     
     override func cancel() {
         super.cancel()
-        // MARK: - 这里看之后能不能升级，如果已经下载有数据，能否将数据暂存用于下次使用
         cancelTask()
         finish()
+    }
+
+    func cancel(completion: @escaping (Data?) -> Void) {
+        super.cancel()
+        stateLock.lock()
+        let task = task
+        self.task = nil
+        stateLock.unlock()
+        if let task {
+            _ = downloader?.removeTaskIdentifier(for: task)
+        }
+        context?.downloadOperationDidDetach(self)
+        guard let task else {
+            finish()
+            DispatchQueue.global().async {
+                completion(nil)
+            }
+            return
+        }
+        task.cancel { [self] resumeData in
+            finish()
+            completion(resumeData)
+        }
     }
     
     private func finish() {
@@ -124,6 +162,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
         if let task {
             _ = downloader?.removeTaskIdentifier(for: task)
         }
+        context?.downloadOperationDidDetach(self)
     }
 
     private func cancelTask() {
@@ -134,6 +173,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
         if let task {
             _ = downloader?.removeTaskIdentifier(for: task)
         }
+        context?.downloadOperationDidDetach(self)
         task?.cancel()
     }
 }
@@ -146,27 +186,16 @@ extension DownloadOperation {
             finish()
         }
         guard !isCancelled else { return }
-        guard let response = response as? HTTPURLResponse else {
-            downloader?.downloadFail(key: context.key, error: .invalidResponse)
-            return
-        }
-        guard (200 ... 299).contains(response.statusCode) else {
-            downloader?.downloadFail(key: context.key, error: .unacceptableStatusCode(response.statusCode))
-            return
-        }
-
-        if context.mimeType == nil {
-            context.mimeType = response.mimeType
-        }
-        if let fileSize = try? temporaryURL.resourceValues(forKeys: [.fileSizeKey]).fileSize {
-            context.fileSize = Int64(fileSize)
-        }
-
-        do {
-            let cacheFileURL = try persistDownloadedFile(from: temporaryURL)
-            downloader?.downloadSuccess(key: context.key, result: .init(localURL: cacheFileURL, fileSize: context.fileSize, mimeType: context.mimeType))
-        } catch {
-            downloader?.downloadFail(key: context.key, error: .underlying(error))
+        guard let context else { return }
+        switch context.downloadOperation(
+            self,
+            didFinishDownloadingAt: temporaryURL,
+            response: response
+        ) {
+        case let .success(result):
+            downloader?.downloadSuccess(key: context.key, result: result)
+        case let .failure(error):
+            downloader?.downloadFail(key: context.key, error: error)
         }
     }
 
@@ -176,7 +205,7 @@ extension DownloadOperation {
             clearTask()
             finish()
         }
-        guard !isCancelled else { return }
+        guard !isCancelled, let context else { return }
 
         if let urlError = error as? URLError {
             downloader?.downloadFail(key: context.key, error: .network(urlError))
@@ -185,20 +214,4 @@ extension DownloadOperation {
         }
     }
     
-    private func persistDownloadedFile(from temporaryURL: URL) throws -> URL {
-        let cacheFileURL = context.cacheFileURL
-        let fileManager = FileManager.default
-
-        try fileManager.createDirectory(
-            at: cacheFileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-
-        if fileManager.fileExists(atPath: cacheFileURL.path) {
-            try fileManager.removeItem(at: cacheFileURL)
-        }
-
-        try fileManager.moveItem(at: temporaryURL, to: cacheFileURL)
-        return cacheFileURL
-    }
 }

@@ -8,7 +8,10 @@
 import UIKit
 
 public final class ResourceScheduler: NSObject {
+
+    private static let minimumResumableBytes: Int64 = 5 * 1024 * 1024
     
+    // MARK: -------------- lock from
     /// 以资源键维护正在处理的下载上下文，用于请求去重与快速取消。
     private var downloadingContexts: [ResourceKey: DownloadContext] = [:]
     
@@ -18,6 +21,7 @@ public final class ResourceScheduler: NSObject {
     /// 正在等待重试间隔结束的任务。
     private var retryingContexts: [ResourceKey: DownloadContext] = [:]
     
+    // MARK: -------------- lock end
     private let lock: NSLock = .init()
 
     private let configuration: URLSessionConfiguration
@@ -63,7 +67,61 @@ public final class ResourceScheduler: NSObject {
     #endif
 }
 
+// MARK: - 暂停/取消下载
 extension ResourceScheduler {
+    
+    func pause(request: ResourceRequest) {
+        func removeRequestSubscriber(_ request: ResourceRequest, from context: DownloadContext) -> Bool {
+            let subscriberCount = context.subscribers.count
+            context.subscribers.removeAll { $0.request.identifier == request.identifier }
+            return subscriberCount != context.subscribers.count
+        }
+        
+        lock.lock()
+
+        guard let context = downloadingContexts[request.key]
+            ?? waitingContexts[request.key]
+            ?? retryingContexts[request.key],
+              removeRequestSubscriber(request, from: context) else {
+            lock.unlock()
+            return
+        }
+        if context.subscribers.isEmpty {
+            waitingContexts.removeValue(forKey: request.key)
+            retryingContexts.removeValue(forKey: request.key)
+            guard downloadingContexts.removeValue(forKey: request.key) != nil, (context.fileSize ?? 0) >= Self.minimumResumableBytes else {
+                context.cancel()
+                startWaitingContextsIfPossible()
+                lock.unlock()
+                return
+            }
+            downloadingContexts[request.key] = context
+            context.updateState(.pausing)
+            lock.unlock()
+            context.cancelPreservingResumeData { [weak self, weak context] canResume in
+                guard let self, let context else { return }
+                self.lock.lock()
+                guard self.downloadingContexts[context.key] === context else {
+                    self.lock.unlock()
+                    return
+                }
+                self.downloadingContexts.removeValue(forKey: context.key)
+                if canResume {
+                    context.updateState(.paused)
+                    // TODO: 为无订阅者的暂停任务增加容量或 TTL 回收策略。
+                    self.waitingContexts[context.key] = context
+                }
+                self.startWaitingContextsIfPossible()
+                lock.unlock()
+            }
+            lock.lock()
+        } else {
+            context.effectivePriority = context.subscribers.map { $0.request.initialPriority }.max() ?? .normal
+        }
+        
+        startWaitingContextsIfPossible()
+        lock.unlock()
+    }
     
     func cancel(request: ResourceRequest) {
         lock.lock()
@@ -77,8 +135,7 @@ extension ResourceScheduler {
                 waitingContexts.removeValue(forKey: request.key)
                 downloadingContexts.removeValue(forKey: request.key)
                 retryingContexts.removeValue(forKey: request.key)
-                context.state = .cancelled
-                context.operation?.cancel()
+                context.cancel()
             } else {
                 context.effectivePriority = context.subscribers.map { $0.request.initialPriority }.max() ?? .normal
             }
@@ -97,61 +154,66 @@ extension ResourceScheduler {
     }
 }
 
-// TODO: 之后看下需不需要处理304缓存映射码
-// TODO: 看下如何分段下载提高效率
-// TODO: 看下如何断点续传提供性能
 extension ResourceScheduler {
     
-    func load(request: ResourceRequest, subscriber: DownloadResultSubscriber) {
-        if let cacheResult = cacheStore.load(request: request) {
-            let result = ResourceDownloadResult(
-                localURL: cacheResult.localURL,
-                fileSize: cacheResult.fileSize,
-                mimeType: cacheResult.mimeType
-            )
-            if let path = request.customSavePath,
-               path.standardizedFileURL != result.localURL.standardizedFileURL {
-                do {
-                    var isDirectory: ObjCBool = false
-                    let exists = FileManager.default.fileExists(
-                        atPath: path.path,
-                        isDirectory: &isDirectory
-                    )
-                    guard path.isFileURL, !path.hasDirectoryPath,
-                          !(exists && isDirectory.boolValue) else {
-                        throw CocoaError(.fileWriteInvalidFileName)
-                    }
-                    let destination = path.standardizedFileURL
-                    try FileManager.default.createDirectory(
-                        at: destination.deletingLastPathComponent(),
-                        withIntermediateDirectories: true
-                    )
-                    if FileManager.default.fileExists(atPath: destination.path) {
-                        try FileManager.default.removeItem(at: destination)
-                    }
-                    try FileManager.default.copyItem(at: result.localURL, to: destination)
-                } catch {
-                    lock.lock()
-                    removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
-                    removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
-                    removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
-                    startWaitingContextsIfPossible()
-                    lock.unlock()
-                    Task { @MainActor in
-                        request.errorBlock?(.underlying(error))
-                    }
-                    return
+    private func cacheHandle(request: ResourceRequest, subscriber: DownloadResultSubscriber) -> Bool {
+        guard let cacheResult = cacheStore.load(request: request) else {
+            return false
+        }
+
+        let result = ResourceDownloadResult(
+            localURL: cacheResult.localURL,
+            fileSize: cacheResult.fileSize,
+            mimeType: cacheResult.mimeType
+        )
+        if let path = request.customSavePath,
+           path.standardizedFileURL != result.localURL.standardizedFileURL {
+            do {
+                var isDirectory: ObjCBool = false
+                let exists = FileManager.default.fileExists(
+                    atPath: path.path,
+                    isDirectory: &isDirectory
+                )
+                guard path.isFileURL, !path.hasDirectoryPath,
+                      !(exists && isDirectory.boolValue) else {
+                    throw CocoaError(.fileWriteInvalidFileName)
                 }
+                let destination = path.standardizedFileURL
+                try FileManager.default.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try FileManager.default.removeItem(at: destination)
+                }
+                try FileManager.default.copyItem(at: result.localURL, to: destination)
+            } catch {
+                lock.lock()
+                removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
+                removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
+                removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
+                startWaitingContextsIfPossible()
+                lock.unlock()
+                Task { @MainActor in
+                    request.errorBlock?(.underlying(error))
+                }
+                return true
             }
-            lock.lock()
-            removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
-            removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
-            removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
-            startWaitingContextsIfPossible()
-            lock.unlock()
-            Task { @MainActor in
-                request.completion?(result)
-            }
+        }
+        lock.lock()
+        removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
+        removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
+        removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
+        startWaitingContextsIfPossible()
+        lock.unlock()
+        Task { @MainActor in
+            request.completion?(result)
+        }
+        return true
+    }
+    
+    func load(request: ResourceRequest, subscriber: DownloadResultSubscriber) {
+        if cacheHandle(request: request, subscriber: subscriber) {
             return
         }
 
@@ -167,10 +229,20 @@ extension ResourceScheduler {
         if let context = downloadingContexts[request.key]
             ?? waitingContexts[request.key]
             ?? retryingContexts[request.key] {
+            if case .pausing = context.state {
+                Task { @MainActor in
+                    request.errorBlock?(.pausingInProgress)
+                }
+                return
+            }
             context.subscribers.append(
                 DownloadSubscriber(request: request, resultSubscriber: subscriber)
             )
             context.effectivePriority = max(context.effectivePriority, request.initialPriority)
+            if case .paused = context.state {
+                context.updateState(.waiting)
+            }
+            startWaitingContextsIfPossible()
             return
         }
 
@@ -185,6 +257,7 @@ extension ResourceScheduler {
     }
 }
 
+// MARK: - 调度，需要lock包裹
 extension ResourceScheduler {
     
     /// 调用方必须持有 lock；按优先级降序、创建时间升序填充所有可用下载槽位。
@@ -193,36 +266,22 @@ extension ResourceScheduler {
               let context = nextWaitingContext() {
             waitingContexts.removeValue(forKey: context.key)
             downloadingContexts[context.key] = context
-            context.state = .downloading(progress: context.progress ?? 0)
+            context.updateState(.downloading(progress: context.progress ?? 0))
             downloader.addDownload(context: context)
         }
     }
     
     private func nextWaitingContext() -> DownloadContext? {
-        waitingContexts.values.max { lhs, rhs in
+        waitingContexts.values.filter {
+            guard !$0.subscribers.isEmpty else { return false }
+            if case .waiting = $0.state { return true }
+            return false
+        }.max { lhs, rhs in
             if lhs.effectivePriority != rhs.effectivePriority {
                 return lhs.effectivePriority < rhs.effectivePriority
             }
             return lhs.creationTime > rhs.creationTime
         }
-    }
-
-    private func retryDelay(for failRetryCount: Int) -> TimeInterval {
-        let exponent = min(max(failRetryCount - 1, 0), 3)
-        return TimeInterval(1 << exponent)
-    }
-
-    private func enqueueRetry(key: ResourceKey, context: DownloadContext) {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard let retryingContext = retryingContexts[key], retryingContext === context else {
-            return
-        }
-        retryingContexts.removeValue(forKey: key)
-        context.state = .waiting
-        waitingContexts[key] = context
-        startWaitingContextsIfPossible()
     }
     
     private func removeSubscriber(
@@ -234,15 +293,36 @@ extension ResourceScheduler {
             guard key != retainedKey else {
                 return nil
             }
+            let subscriberCount = context.subscribers.count
             context.subscribers.removeAll { $0.resultSubscriber.matches(subscriber) }
-            return context.subscribers.isEmpty ? key : nil
+            return subscriberCount != context.subscribers.count && context.subscribers.isEmpty ? key : nil
         }
 
         for key in keysToRemove {
             let context = contexts.removeValue(forKey: key)
-            context?.state = .cancelled
-            context?.operation?.cancel()
+            context?.cancel()
         }
+    }
+}
+
+extension ResourceScheduler {
+
+    private func retryDelay(for failRetryCount: Int) -> TimeInterval {
+        let exponent = min(max(failRetryCount - 1, 0), 3)
+        return TimeInterval(1 << exponent)
+    }
+    
+    private func enqueueRetry(key: ResourceKey, context: DownloadContext) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let retryingContext = retryingContexts[key], retryingContext === context else {
+            return
+        }
+        retryingContexts.removeValue(forKey: key)
+        context.updateState(.waiting)
+        waitingContexts[key] = context
+        startWaitingContextsIfPossible()
     }
 }
 
@@ -254,20 +334,21 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
             lock.unlock()
             return
         }
+        guard case .downloading = context.state else {
+            lock.unlock()
+            return
+        }
         if context.startDownloadTime == nil {
             context.startDownloadTime = .init()
         }
-        if context.mimeType == nil {
-            context.mimeType = mimeType
-        }
-        context.fileSize = bytesWritten
+        context.updateDownloadMetadata(mimeType: mimeType, fileSize: bytesWritten)
         guard expectedBytes > 0 else {
             lock.unlock()
             return
         }
         let progress = Float(bytesWritten) / Float(expectedBytes)
         context.progress = progress
-        context.state = .downloading(progress: progress)
+        context.updateState(.downloading(progress: progress))
         let subscribers = context.subscribers
         lock.unlock()
         Task { @MainActor in
@@ -288,7 +369,7 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
             lock.unlock()
             return
         }
-        context.state = .completed
+        context.updateState(.completed)
         let subscribers = context.subscribers
         startWaitingContextsIfPossible()
         lock.unlock()
@@ -343,8 +424,9 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
     
     func downloadFail(key: ResourceKey, error: ResourceTransferError) {
         lock.lock()
+        defer { lock.unlock() }
+        
         guard let context = downloadingContexts.removeValue(forKey: key) else {
-            lock.unlock()
             return
         }
 
@@ -356,17 +438,16 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
             !error.isRetryable || context.failRetryCount > $0.request.maxFailRetryCount
         }
         if !context.subscribers.isEmpty {
-            context.state = .retrying(failRetryCount: context.failRetryCount)
+            context.updateState(.retrying(failRetryCount: context.failRetryCount))
             retryingContexts[key] = context
             let retryDelay = retryDelay(for: context.failRetryCount)
             DispatchQueue.global().asyncAfter(deadline: .now() + retryDelay) { [weak self] in
                 self?.enqueueRetry(key: key, context: context)
             }
         } else {
-            context.state = .failed(error)
+            context.updateState(.failed(error))
         }
         startWaitingContextsIfPossible()
-        lock.unlock()
 
         Task { @MainActor in
             failedSubscribers.forEach { $0.request.errorBlock?(error) }
