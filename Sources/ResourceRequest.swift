@@ -36,6 +36,9 @@ public struct ResourceRequest {
     
     /// 同一个资源失败后允许重新进入调度队列的最大次数，范围为 0...5，默认值为 3。
     public let maxFailRetryCount: Int
+
+    /// 资源存在于有效缓存时是否直接使用缓存结果；默认开启。
+    public let usesCacheIfAvailable: Bool
     
     public let completion: (@MainActor (ResourceDownloadResult) -> Void)?
     
@@ -48,6 +51,7 @@ public struct ResourceRequest {
         customSavePath: URL? = nil,
         priority: RequestPriority = .normal,
         maxFailRetryCount: Int = 3,
+        usesCacheIfAvailable: Bool = true,
         completion: (@MainActor (ResourceDownloadResult) -> Void)? = nil,
         errorBlock: (@MainActor (ResourceTransferError) -> Void)? = nil,
         progressBlock: (@MainActor (Float) -> Void)? = nil
@@ -56,6 +60,7 @@ public struct ResourceRequest {
         self.customSavePath = customSavePath
         self.initialPriority = priority
         self.maxFailRetryCount = min(max(0, maxFailRetryCount), 5)
+        self.usesCacheIfAvailable = usesCacheIfAvailable
         self.completion = completion
         self.errorBlock = errorBlock
         self.progressBlock = progressBlock

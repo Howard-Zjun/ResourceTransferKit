@@ -47,6 +47,7 @@ public final class CacheStore: NSObject {
         if let data = try? Data(contentsOf: metadataFileURL) {
             cacheMetaDatas = (try? JSONDecoder().decode([CacheMetadata].self, from: data)) ?? []
         }
+        removeUnindexedFiles()
     }
 
     // MARK: - Unit Test
@@ -72,6 +73,7 @@ public final class CacheStore: NSObject {
         if let data = try? Data(contentsOf: metadataFileURL) {
             cacheMetaDatas = (try? JSONDecoder().decode([CacheMetadata].self, from: data)) ?? []
         }
+        removeUnindexedFiles()
     }
     #endif
 }
@@ -117,6 +119,53 @@ extension CacheStore {
 
     func save(
         key: ResourceKey,
+        downloadResult: ResourceDownloadResult,
+        response: HTTPURLResponse
+    ) throws -> ResourceDownloadResult {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let destinationURL = cacheFileURL(for: key)
+        guard CacheMetadata.isStorable(response: response) else {
+            return downloadResult
+        }
+        try fileManager.createDirectory(
+            at: cacheDirectory,
+            withIntermediateDirectories: true
+        )
+
+        if downloadResult.localURL.standardizedFileURL != destinationURL.standardizedFileURL {
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            try fileManager.copyItem(at: downloadResult.localURL, to: destinationURL)
+        }
+
+        let fileSize = fileSize(at: destinationURL)
+        let metadata = CacheMetadata(
+            resourceKey: key,
+            mimeType: downloadResult.mimeType,
+            fileSize: fileSize,
+            lastAccessDate: .init(),
+            response: response
+        )
+        cacheMetaDatas.removeAll { $0.resourceKey == key }
+        cacheMetaDatas.append(metadata)
+        try? saveMetadata()
+        let cachedResult = ResourceDownloadResult(
+            localURL: destinationURL,
+            fileSize: fileSize,
+            mimeType: downloadResult.mimeType
+        )
+        removeExpiredFilesAndTrimToLimit(excluding: key)
+
+        return cachedResult
+    }
+
+    #if DEBUG
+    /// 仅供不具备 HTTP 响应的缓存单元测试构造测试数据。
+    func save(
+        key: ResourceKey,
         downloadResult: ResourceDownloadResult
     ) throws -> ResourceDownloadResult {
         lock.lock()
@@ -154,6 +203,7 @@ extension CacheStore {
 
         return cachedResult
     }
+    #endif
 
     public func removeAll() {
         lock.lock()
@@ -171,27 +221,9 @@ private extension CacheStore {
         try data.write(to: metadataFileURL, options: .atomic)
     }
 
+    /// 清理无索引或过期资源，并在超过磁盘上限时按 LRU 回收；当前保存的资源不会被移除。
     func removeExpiredFilesAndTrimToLimit(excluding protectedKey: ResourceKey) {
-        let indexedFileURLs = Set(
-            cacheMetaDatas.map {
-                cacheFileURL(for: $0.resourceKey).standardizedFileURL
-            }
-        )
-        if let enumerator = fileManager.enumerator(
-            at: cacheDirectory,
-            includingPropertiesForKeys: [.isRegularFileKey],
-            options: [.skipsHiddenFiles]
-        ) {
-            for case let fileURL as URL in enumerator {
-                let standardizedFileURL = fileURL.standardizedFileURL
-                guard standardizedFileURL != metadataFileURL.standardizedFileURL,
-                      !indexedFileURLs.contains(standardizedFileURL),
-                      (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else {
-                    continue
-                }
-                try? fileManager.removeItem(at: fileURL)
-            }
-        }
+        removeUnindexedFiles()
 
         let now = Date()
         cacheMetaDatas.removeAll { metadata in
@@ -227,6 +259,30 @@ private extension CacheStore {
         try? saveMetadata()
     }
 
+    /// 删除缓存目录中没有对应元数据记录的普通文件，用于恢复中断或不缓存下载遗留的文件。
+    func removeUnindexedFiles() {
+        let indexedFileURLs = Set(
+            cacheMetaDatas.map {
+                cacheFileURL(for: $0.resourceKey).standardizedFileURL
+            }
+        )
+        if let enumerator = fileManager.enumerator(
+            at: cacheDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let fileURL as URL in enumerator {
+                let standardizedFileURL = fileURL.standardizedFileURL
+                guard standardizedFileURL != metadataFileURL.standardizedFileURL,
+                      !indexedFileURLs.contains(standardizedFileURL),
+                      (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else {
+                    continue
+                }
+                try? fileManager.removeItem(at: fileURL)
+            }
+        }
+    }
+
     func fileSize(at localURL: URL) -> Int64? {
         guard let size = try? fileManager.attributesOfItem(atPath: localURL.path)[.size] as? NSNumber else {
             return nil
@@ -240,53 +296,5 @@ private extension ResourceKey {
     var cacheIdentifier: String {
         let digest = SHA256.hash(data: Data(url.absoluteString.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
-    }
-}
-
-struct CacheMetadata: Codable {
-
-    let resourceKey: ResourceKey
-    
-    let mimeType: String?
-    
-    let fileSize: Int64?
-
-    var lastAccessDate: Date
-
-    var localURL: URL {
-        CacheStore.default.cacheFileURL(for: resourceKey)
-    }
-
-    #if DEBUG
-    func localURL(in cacheStore: CacheStore) -> URL {
-        cacheStore.cacheFileURL(for: resourceKey)
-    }
-    #endif
-
-    init(
-        resourceKey: ResourceKey,
-        mimeType: String?,
-        fileSize: Int64?,
-        lastAccessDate: Date
-    ) {
-        self.resourceKey = resourceKey
-        self.mimeType = mimeType
-        self.fileSize = fileSize
-        self.lastAccessDate = lastAccessDate
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case resourceKey
-        case mimeType
-        case fileSize
-        case lastAccessDate
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        resourceKey = try container.decode(ResourceKey.self, forKey: .resourceKey)
-        mimeType = try container.decodeIfPresent(String.self, forKey: .mimeType)
-        fileSize = try container.decodeIfPresent(Int64.self, forKey: .fileSize)
-        lastAccessDate = try container.decodeIfPresent(Date.self, forKey: .lastAccessDate) ?? .init()
     }
 }

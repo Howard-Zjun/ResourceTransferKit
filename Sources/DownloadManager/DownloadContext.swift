@@ -20,7 +20,7 @@ final class DownloadContext {
     var effectivePriority: RequestPriority
     
     let creationTime: Date
-    
+
     var startDownloadTime: Date?
     
     /// 当前资源任务已消耗的失败重试次数，所有订阅者共享。
@@ -38,6 +38,8 @@ final class DownloadContext {
     private var _mimeType: String?
     
     private var _fileSize: Int64?
+
+    private var _response: HTTPURLResponse?
     
     // MARK: - lock end
     private let stateLock = NSLock()
@@ -60,6 +62,12 @@ final class DownloadContext {
         return _fileSize
     }
     
+    var response: HTTPURLResponse? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _response
+    }
+    
     init(request: ResourceRequest, subscriber: DownloadResultSubscriber, priority: RequestPriority) {
         self.key = request.key
         self.cacheFileURL = CacheStore.default.cacheFileURL(for: request.key)
@@ -67,7 +75,7 @@ final class DownloadContext {
         self.effectivePriority = priority
         creationTime = .init()
     }
-
+    
     func updateState(_ state: TransferState) {
         stateLock.lock()
         _state = state
@@ -136,6 +144,10 @@ extension DownloadContext: DownloadOperationDelegate {
         guard let response = response as? HTTPURLResponse else {
             return .failure(.invalidResponse)
         }
+        stateLock.lock()
+        _response = response
+        stateLock.unlock()
+
         guard (200 ... 299).contains(response.statusCode) else {
             return .failure(.unacceptableStatusCode(response.statusCode))
         }

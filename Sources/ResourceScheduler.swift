@@ -157,7 +157,9 @@ extension ResourceScheduler {
 extension ResourceScheduler {
     
     private func cacheHandle(request: ResourceRequest, subscriber: DownloadResultSubscriber) -> Bool {
-        guard let cacheResult = cacheStore.load(request: request) else {
+        guard request.usesCacheIfAvailable,
+              let cacheResult = cacheStore.load(request: request),
+              cacheResult.isFresh else {
             return false
         }
 
@@ -374,10 +376,16 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         startWaitingContextsIfPossible()
         lock.unlock()
 
-        let cachedResult = (try? cacheStore.save(
-            key: key,
-            downloadResult: result
-        )) ?? result
+        let cachedResult: ResourceDownloadResult
+        if let response = context.response {
+            cachedResult = (try? cacheStore.save(
+                key: key,
+                downloadResult: result,
+                response: response
+            )) ?? result
+        } else {
+            cachedResult = result
+        }
 
         var copies: [URL: Result<Void, Error>] = [:]
         var failedSubscribers: [(DownloadSubscriber, ResourceTransferError)] = []
