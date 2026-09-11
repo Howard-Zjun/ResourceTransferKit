@@ -18,15 +18,20 @@ struct CacheMetadata: Codable {
     var lastAccessDate: Date
 
     // MARK: - 强缓存
-    let cacheControl: String?
+    var cacheControl: String?
 
-    let responseDate: Date?
+    var responseDate: Date?
 
-    let responseAge: TimeInterval?
+    var responseAge: TimeInterval?
 
-    let expires: Date?
+    var expires: Date?
 
-    let storedAt: Date
+    var storedAt: Date
+
+    // MARK: - 协商缓存
+    var eTag: String?
+
+    var lastModified: String?
 
     var localURL: URL {
         CacheStore.default.cacheFileURL(for: resourceKey)
@@ -54,6 +59,8 @@ struct CacheMetadata: Codable {
         responseAge = response?.value(forHTTPHeaderField: "Age").flatMap(TimeInterval.init)
         expires = response?.value(forHTTPHeaderField: "Expires").flatMap(Self.httpDate)
         storedAt = .init()
+        eTag = response?.value(forHTTPHeaderField: "ETag")
+        lastModified = response?.value(forHTTPHeaderField: "Last-Modified")
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -66,6 +73,8 @@ struct CacheMetadata: Codable {
         case responseAge
         case expires
         case storedAt
+        case eTag
+        case lastModified
     }
 
     init(from decoder: Decoder) throws {
@@ -79,6 +88,8 @@ struct CacheMetadata: Codable {
         responseAge = try container.decodeIfPresent(TimeInterval.self, forKey: .responseAge)
         expires = try container.decodeIfPresent(Date.self, forKey: .expires)
         storedAt = try container.decodeIfPresent(Date.self, forKey: .storedAt) ?? lastAccessDate
+        eTag = try container.decodeIfPresent(String.self, forKey: .eTag)
+        lastModified = try container.decodeIfPresent(String.self, forKey: .lastModified)
     }
 }
 
@@ -107,6 +118,18 @@ extension CacheMetadata {
 
     var isStorable: Bool {
         cacheControlDirectives["no-store"] == nil
+    }
+
+    mutating func refreshAfterRevalidation(response: HTTPURLResponse) {
+        let now = Date()
+        cacheControl = response.value(forHTTPHeaderField: "Cache-Control") ?? cacheControl
+        responseDate = response.value(forHTTPHeaderField: "Date").flatMap(Self.httpDate) ?? now
+        responseAge = response.value(forHTTPHeaderField: "Age").flatMap(TimeInterval.init) ?? 0
+        expires = response.value(forHTTPHeaderField: "Expires").flatMap(Self.httpDate) ?? expires
+        eTag = response.value(forHTTPHeaderField: "ETag") ?? eTag
+        lastModified = response.value(forHTTPHeaderField: "Last-Modified") ?? lastModified
+        storedAt = now
+        lastAccessDate = storedAt
     }
 
     private var currentAge: TimeInterval {

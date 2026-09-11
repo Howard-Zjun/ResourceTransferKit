@@ -40,6 +40,8 @@ final class DownloadContext {
     private var _fileSize: Int64?
 
     private var _response: HTTPURLResponse?
+
+    private let cachedMetadata: CacheMetadata?
     
     // MARK: - lock end
     private let stateLock = NSLock()
@@ -68,11 +70,17 @@ final class DownloadContext {
         return _response
     }
     
-    init(request: ResourceRequest, subscriber: DownloadResultSubscriber, priority: RequestPriority) {
+    init(
+        request: ResourceRequest,
+        subscriber: DownloadResultSubscriber,
+        priority: RequestPriority,
+        cachedMetadata: CacheMetadata? = nil
+    ) {
         self.key = request.key
         self.cacheFileURL = CacheStore.default.cacheFileURL(for: request.key)
         self.subscribers = [.init(request: request, resultSubscriber: subscriber)]
         self.effectivePriority = priority
+        self.cachedMetadata = cachedMetadata
         creationTime = .init()
     }
     
@@ -126,7 +134,20 @@ final class DownloadContext {
 }
 
 extension DownloadContext: DownloadOperationDelegate {
-
+    
+    var urlRequest: URLRequest {
+        var request = URLRequest(url: key.url)
+        if let metaData = cachedMetadata {
+            if let eTag = metaData.eTag {
+                request.setValue(eTag, forHTTPHeaderField: "If-None-Match")
+            }
+            if let lastModified = metaData.lastModified {
+                request.setValue(lastModified, forHTTPHeaderField: "If-Modified-Since")
+            }
+        }
+        return request
+    }
+    
     func downloadOperationResumeData(_ operation: DownloadOperation) -> Data? {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -147,6 +168,13 @@ extension DownloadContext: DownloadOperationDelegate {
         stateLock.lock()
         _response = response
         stateLock.unlock()
+
+        if response.statusCode == 304 {
+            guard FileManager.default.fileExists(atPath: cacheFileURL.path) else {
+                return .failure(.missingDownloadedFile)
+            }
+            return .success(.init(localURL: cacheFileURL, fileSize: nil, mimeType: nil))
+        }
 
         guard (200 ... 299).contains(response.statusCode) else {
             return .failure(.unacceptableStatusCode(response.statusCode))

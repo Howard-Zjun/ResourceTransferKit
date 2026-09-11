@@ -7,6 +7,12 @@
 
 import UIKit
 
+private enum CacheLookupResult {
+    case handled
+    case stale(CacheMetadata)
+    case miss
+}
+
 public final class ResourceScheduler: NSObject {
 
     private static let minimumResumableBytes: Int64 = 5 * 1024 * 1024
@@ -156,11 +162,13 @@ extension ResourceScheduler {
 
 extension ResourceScheduler {
     
-    private func cacheHandle(request: ResourceRequest, subscriber: DownloadResultSubscriber) -> Bool {
+    private func cacheHandle(request: ResourceRequest, subscriber: DownloadResultSubscriber) -> CacheLookupResult {
         guard request.usesCacheIfAvailable,
-              let cacheResult = cacheStore.load(request: request),
-              cacheResult.isFresh else {
-            return false
+              let cacheResult = cacheStore.load(key: request.key) else {
+            return .miss
+        }
+        guard cacheResult.isFresh else {
+            return .stale(cacheResult)
         }
 
         let result = ResourceDownloadResult(
@@ -199,7 +207,7 @@ extension ResourceScheduler {
                 Task { @MainActor in
                     request.errorBlock?(.underlying(error))
                 }
-                return true
+                return .handled
             }
         }
         lock.lock()
@@ -211,12 +219,18 @@ extension ResourceScheduler {
         Task { @MainActor in
             request.completion?(result)
         }
-        return true
+        return .handled
     }
     
     func load(request: ResourceRequest, subscriber: DownloadResultSubscriber) {
-        if cacheHandle(request: request, subscriber: subscriber) {
+        let cachedMetadata: CacheMetadata?
+        switch cacheHandle(request: request, subscriber: subscriber) {
+        case .handled:
             return
+        case let .stale(metadata):
+            cachedMetadata = metadata
+        case .miss:
+            cachedMetadata = nil
         }
 
         lock.lock()
@@ -252,7 +266,8 @@ extension ResourceScheduler {
         let context = DownloadContext(
             request: request,
             subscriber: subscriber,
-            priority: request.initialPriority
+            priority: request.initialPriority,
+            cachedMetadata: cachedMetadata
         )
         waitingContexts[request.key] = context
         startWaitingContextsIfPossible()
@@ -377,7 +392,9 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         lock.unlock()
 
         let cachedResult: ResourceDownloadResult
-        if let response = context.response {
+        if let response = context.response, response.statusCode == 304 {
+            cachedResult = cacheStore.revalidate(key: key, response: response) ?? result
+        } else if let response = context.response {
             cachedResult = (try? cacheStore.save(
                 key: key,
                 downloadResult: result,

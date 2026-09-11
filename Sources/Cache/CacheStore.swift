@@ -84,12 +84,12 @@ extension CacheStore {
         cacheDirectory.appendingPathComponent(key.cacheIdentifier)
     }
 
-    func load(request: ResourceRequest) -> CacheMetadata? {
+    func load(key: ResourceKey, updateAccessDate: Bool = true) -> CacheMetadata? {
         lock.lock()
         defer { lock.unlock() }
 
         guard let index = cacheMetaDatas.firstIndex(
-            where: { $0.resourceKey == request.key }
+            where: { $0.resourceKey == key }
         ) else {
             return nil
         }
@@ -97,19 +97,21 @@ extension CacheStore {
         let metadata = cacheMetaDatas[index]
         let localURL = cacheFileURL(for: metadata.resourceKey)
         guard fileManager.fileExists(atPath: localURL.path) else {
-            cacheMetaDatas.removeAll { $0.resourceKey == request.key }
+            cacheMetaDatas.removeAll { $0.resourceKey == key }
             try? saveMetadata()
             return nil
         }
 
         guard Date().timeIntervalSince(metadata.lastAccessDate) <= maximumAge else {
             try? fileManager.removeItem(at: localURL)
-            cacheMetaDatas.removeAll { $0.resourceKey == request.key }
+            cacheMetaDatas.removeAll { $0.resourceKey == key }
             try? saveMetadata()
             return nil
         }
 
-        cacheMetaDatas[index].lastAccessDate = .init()
+        if updateAccessDate {
+            cacheMetaDatas[index].lastAccessDate = .init()
+        }
         try? saveMetadata()
         return cacheMetaDatas[index]
     }
@@ -160,6 +162,29 @@ extension CacheStore {
         removeExpiredFilesAndTrimToLimit(excluding: key)
 
         return cachedResult
+    }
+
+    func revalidate(key: ResourceKey, response: HTTPURLResponse) -> ResourceDownloadResult? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard let index = cacheMetaDatas.firstIndex(where: { $0.resourceKey == key }) else {
+            return nil
+        }
+        let localURL = cacheFileURL(for: key)
+        guard fileManager.fileExists(atPath: localURL.path) else {
+            cacheMetaDatas.remove(at: index)
+            try? saveMetadata()
+            return nil
+        }
+
+        cacheMetaDatas[index].refreshAfterRevalidation(response: response)
+        try? saveMetadata()
+        return ResourceDownloadResult(
+            localURL: localURL,
+            fileSize: cacheMetaDatas[index].fileSize,
+            mimeType: cacheMetaDatas[index].mimeType
+        )
     }
 
     #if DEBUG

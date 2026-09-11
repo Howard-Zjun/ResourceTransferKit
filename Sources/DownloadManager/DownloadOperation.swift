@@ -10,6 +10,7 @@ import UIKit
 protocol DownloadOperationDelegate: AnyObject {
 
     var key: ResourceKey { get }
+    var urlRequest: URLRequest { get }
     func downloadOperationDidAttach(_ operation: DownloadOperation)
     func downloadOperationResumeData(_ operation: DownloadOperation) -> Data?
     func downloadOperation(_ operation: DownloadOperation, didFinishDownloadingAt temporaryURL: URL, response: URLResponse?) -> Result<ResourceDownloadResult, ResourceTransferError>
@@ -89,7 +90,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
         if let resumeData = context.downloadOperationResumeData(self) {
             task = session.downloadTask(withResumeData: resumeData)
         } else {
-            task = session.downloadTask(with: URLRequest(url: context.key.url))
+            task = session.downloadTask(with: context.urlRequest)
         }
         resume(task: task)
     }
