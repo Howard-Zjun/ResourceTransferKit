@@ -24,17 +24,21 @@ import ResourceTransferKit
 ```mermaid
 flowchart TD
     A[ResourceRequest.startLoad] --> B[ResourceScheduler]
-    B --> C{CacheStore 命中且文件存在?}
+    B --> C{使用有效本地缓存?}
     C -- 是 --> D[更新 lastAccessDate]
     D --> E[可选复制到 customSavePath]
     E --> F[主线程 completion]
-    C -- 否 --> G[按优先级进入等待队列]
-    G --> H[受并发上限约束的 DownloadOperation]
-    H --> I[URLSession 下载到临时文件]
-    I --> J[移动到 CacheStore 管理的缓存文件]
-    J --> K[写入 CacheMetadata]
-    K --> L[先删除无元数据文件，再执行过期与 LRU 清理]
+    C -- 否或已过期 --> G{存在缓存验证器?}
+    G -- 是 --> H[带 If-None-Match / If-Modified-Since 下载]
+    G -- 否 --> I[按优先级进入下载队列]
+    H --> I
+    I --> J[URLSession 下载到临时文件]
+    J --> K{HTTP 304?}
+    K -- 是 --> L[复用本地文件并刷新 CacheMetadata]
+    K -- 否，HTTP 200 --> M[移动到 CacheStore 管理的缓存文件并写入元数据]
     L --> E
+    M --> N[清理无元数据、过期和 LRU 资源]
+    N --> E
 ```
 
 ### 调度规则
@@ -49,9 +53,10 @@ flowchart TD
 
 - 缓存根目录为应用沙盒的 `Library/Caches/ResourceTransferKit/Cache`。
 - 缓存文件名由资源完整 URL 的 SHA-256 标识生成；元数据统一保存在 `metadata.json`。
-- `CacheMetadata` 记录资源键、MIME type、文件大小和最近访问时间；只有元数据与对应缓存文件都存在时才视为命中。
+- `CacheMetadata` 记录资源键、MIME type、文件大小、最近访问时间、`Cache-Control`、`Expires`、`ETag` 和 `Last-Modified`；只有元数据与对应缓存文件都存在时才视为命中。
+- 缓存新鲜度遵循响应的 `Cache-Control` 或 `Expires`。缓存过期后，如存在 `ETag` 或 `Last-Modified`，模块会发送条件请求；服务端返回 `304 Not Modified` 时复用本地文件并刷新元数据，返回新的 `200` 时则覆盖缓存内容。
 - 默认最大磁盘占用为 `300 MB`，超过上限后按最近最少使用（LRU）清理到 `80%` 的目标值。
-- 默认缓存有效期为 7 天。每次保存时会优先删除没有元数据记录的普通文件，随后删除过期资源并执行 LRU 清理。
+- 缓存文件最多保留 7 天。缓存初始化和每次保存时都会优先删除没有元数据记录的普通文件，随后删除过期资源并执行 LRU 清理。
 - 使用 `CacheStore.default.removeAll()` 可清空模块的全部磁盘缓存。
 
 ## 多线程与并发
@@ -113,6 +118,17 @@ request.startLoad()
 ```
 
 `ResourceDownloadResult.localURL` 始终指向模块管理的缓存文件，可直接用来读取、播放或复制资源。
+
+### 控制本地缓存读取
+
+`usesCacheIfAvailable` 默认为 `true`。设为 `false` 时，请求会跳过启动时可直接使用的本地缓存，进入下载流程；下载成功后仍会按响应缓存规则更新模块缓存。
+
+```swift
+let request = ResourceRequest(
+    url: url,
+    usesCacheIfAvailable: false
+)
+```
 
 ### 保存一份到业务目录
 
