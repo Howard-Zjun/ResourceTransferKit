@@ -19,16 +19,6 @@ end
 import ResourceTransferKit
 ```
 
-## 重要组成
-
-- **`ResourceRequest`**：调用方入口，封装资源 URL、优先级、重试上限、缓存读取策略、保存路径及进度/结果回调。
-- **`ResourceScheduler`**：模块调度中枢，负责缓存优先判断、相同资源请求合并、优先级排序、并发槽位分配、取消、暂停及重试任务的流转。
-- **`DownloadContext`**：单个资源传输的共享上下文，维护订阅者、实时状态、下载进度、HTTP 响应、续传数据及缓存验证信息。
-- **`ResourceDownloader` / `DownloadOperation`**：底层下载执行层，基于 `URLSessionDownloadTask` 和 `OperationQueue` 执行受限并发下载，并将进度、完成和失败事件回传给调度器。
-- **`CacheStore` / `CacheMetadata`**：磁盘缓存层；前者负责文件存储、索引写入和容量清理，后者保存大小、访问时间和 HTTP 缓存头，用于判断缓存新鲜度与协商缓存。
-- **`DownloadResultSubscriber`**：订阅抽象，让同一次资源下载可以服务多个调用方；图片订阅者还可按 `UIImageView` 身份取消旧请求，避免列表复用错图。
-- **`UIImageView` 扩展**：提供 `rt_load` 与 `rt_cancel` 两个轻量入口，让图片场景也走统一的调度、缓存和取消逻辑。
-
 ## 核心特性
 
 - **请求去重与订阅复用**：以完整 URL 作为资源键；多个调用方同时请求同一资源时，共用一次网络下载，并分别接收进度、成功或失败回调。
@@ -38,6 +28,16 @@ import ResourceTransferKit
 - **遵循 HTTP 语义的磁盘缓存**：解析 `Cache-Control` 与 `Expires` 判断强缓存有效期；缓存过期后可携带 `ETag` 或 `Last-Modified` 发起条件请求，服务端返回 `304 Not Modified` 时复用本地文件。
 - **可控的缓存生命周期**：缓存文件以 URL 的 SHA-256 标识命名，配套持久化元数据；自动清理无索引文件、过期资源，并在超过容量上限后按 LRU 策略回收空间。
 - **面向 UI 的安全回调**：下载和缓存工作在后台进行，进度、成功和失败回调统一切回主线程；`UIImageView` 提供加载与取消入口，适配列表复用场景。
+
+## 重要组成
+
+- **`ResourceRequest`**：调用方入口，封装资源 URL、优先级、重试上限、缓存读取策略、保存路径及进度/结果回调。
+- **`ResourceScheduler`**：模块调度中枢，负责缓存优先判断、相同资源请求合并、优先级排序、并发槽位分配、取消、暂停及重试任务的流转。
+- **`DownloadContext`**：单个资源传输的共享上下文，维护订阅者、实时状态、下载进度、HTTP 响应、续传数据及缓存验证信息。
+- **`ResourceDownloader` / `DownloadOperation`**：底层下载执行层，基于 `URLSessionDownloadTask` 和 `OperationQueue` 执行受限并发下载，并将进度、完成和失败事件回传给调度器。
+- **`CacheStore` / `CacheMetadata`**：磁盘缓存层；前者负责文件存储、索引写入和容量清理，后者保存大小、访问时间和 HTTP 缓存头，用于判断缓存新鲜度与协商缓存。
+- **`DownloadResultSubscriber`**：订阅抽象，让同一次资源下载可以服务多个调用方；图片订阅者还可按 `UIImageView` 身份取消旧请求，避免列表复用错图。
+- **`UIImageView` 扩展**：提供 `rt_load` 与 `rt_cancel` 两个轻量入口，让图片场景也走统一的调度、缓存和取消逻辑。
 
 ## 模块流程
 
