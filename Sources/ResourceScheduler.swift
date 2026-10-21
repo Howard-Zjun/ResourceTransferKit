@@ -170,7 +170,12 @@ extension ResourceScheduler {
         guard cacheResult.isFresh else {
             return .stale(cacheResult)
         }
-
+     
+        completeRequestFromCache(request: request, subscriber: subscriber, cacheResult: cacheResult)
+        return .handled
+    }
+    
+    private func completeRequestFromCache(request: ResourceRequest, subscriber: DownloadResultSubscriber, cacheResult: CacheMetadata) {
         let result = ResourceDownloadResult(
             localURL: cacheResult.localURL,
             fileSize: cacheResult.fileSize,
@@ -207,7 +212,7 @@ extension ResourceScheduler {
                 Task { @MainActor in
                     request.errorBlock?(.underlying(error))
                 }
-                return .handled
+                return
             }
         }
         lock.lock()
@@ -219,7 +224,6 @@ extension ResourceScheduler {
         Task { @MainActor in
             request.completion?(result)
         }
-        return .handled
     }
     
     func load(request: ResourceRequest, subscriber: DownloadResultSubscriber) {

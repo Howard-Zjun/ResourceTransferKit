@@ -27,7 +27,7 @@ import ResourceTransferKit
 - **按策略自动重试**：对可恢复的网络错误及部分 HTTP 状态码执行退避重试，并允许每个请求配置自己的最大重试次数。
 - **遵循 HTTP 语义的磁盘缓存**：解析 `Cache-Control` 与 `Expires` 判断强缓存有效期；缓存过期后可携带 `ETag` 或 `Last-Modified` 发起条件请求，服务端返回 `304 Not Modified` 时复用本地文件。
 - **可控的缓存生命周期**：缓存文件以 URL 的 SHA-256 标识命名，配套持久化元数据；自动清理无索引文件、过期资源，并在超过容量上限后按 LRU 策略回收空间。
-- **面向 UI 的安全回调**：下载和缓存工作在后台进行，进度、成功和失败回调统一切回主线程；`UIImageView` 提供加载与取消入口，适配列表复用场景。
+- **面向 UI 的安全回调**：进度、成功和失败回调统一在主线程执行，可直接更新 UI；`UIImageView` 提供加载与取消入口，适配列表复用场景。
 
 ## 重要组成
 
@@ -61,14 +61,6 @@ flowchart TD
     N --> E
 ```
 
-### 调度规则
-
-- 同一完整 URL 的并发请求共用同一个下载任务；后加入的请求会合并为订阅者。
-- 请求优先级分为 `.low`、`.normal`、`.high`；等待队列优先处理更高优先级请求，同优先级按创建时间排序。
-- `ResourceScheduler.default.maxDownloadCount` 的可设置范围是 `3...7`，默认值为 `5`。
-- 可重试的网络错误和 HTTP `408`、`429`、`500`、`502`、`503`、`504` 会自动重试；每个请求可设置 `maxFailRetryCount`，范围为 `0...5`，默认 `3` 次。
-- 所有 `completion`、`errorBlock`、`progressBlock` 都在主线程执行。
-
 ### 磁盘缓存规则
 
 - 缓存根目录为应用沙盒的 `Library/Caches/ResourceTransferKit/Cache`。
@@ -79,36 +71,51 @@ flowchart TD
 - 缓存文件最多保留 7 天。缓存初始化和每次保存时都会优先删除没有元数据记录的普通文件，随后删除过期资源并执行 LRU 清理。
 - 使用 `CacheStore.default.removeAll()` 可清空模块的全部磁盘缓存。
 
-## 多线程与并发
+## 多线程下载实现方式
 
-模块不要求调用方手动管理线程，而是在内部将下载工作、共享状态和 UI 回调分开处理：
+下载由 `ResourceScheduler`、`ResourceDownloader` 和 `DownloadOperation` 协作完成：调度器决定哪些资源可以开始下载，下载器通过 `OperationQueue` 控制同时执行的操作数量，每个操作使用 `URLSessionDownloadTask` 执行网络传输。
 
-| 场景 | 实现方式 | 调用方需要做什么 |
-| --- | --- | --- |
-| 多个资源并行下载 | `ResourceDownloader` 使用 `OperationQueue` 执行 `DownloadOperation`；并发数由 `maxDownloadCount` 限制在 `3...7`。 | 按需要设置 `ResourceScheduler.default.maxDownloadCount`。 |
-| 相同资源的并发请求 | `ResourceScheduler` 以完整 URL 作为资源键，将同一资源的多个请求合并为一个下载上下文。 | 每个调用方照常创建并启动 `ResourceRequest`。 |
-| 调度器共享状态 | 等待、下载和重试队列由 `NSLock` 保护，避免 URLSession 回调与调用方的取消操作并发修改队列。 | 不需要自行加锁。 |
-| 磁盘缓存读写 | `CacheStore` 通过独立的 `NSLock` 串行化元数据和文件清理操作，避免缓存索引与文件状态不一致。 | 不需要自行加锁；不要在模块缓存目录中手动改写文件。 |
-| UI 与业务回调 | 下载进度、成功与失败回调通过 `Task { @MainActor in }` 切回主线程。 | 可以直接更新 UI；耗时的业务处理应再派发到自己的后台任务。 |
+### 如何控制下载上限
 
-例如，同时发起多个资源请求时，模块会在后台受限并发下载；相同 URL 只会建立一个网络任务：
+项目使用 `OperationQueue` 管理下载任务，通过它的 `maxConcurrentOperationCount` 控制同时执行的下载操作数量，也就是最大并发下载数。这个值不代表创建固定数量的线程。
+
+调用方通过以下属性设置最大并发下载数，默认值为 `5`：
 
 ```swift
-let urls = [
-    URL(string: "https://example.com/a.mp4")!,
-    URL(string: "https://example.com/b.mp4")!,
-    URL(string: "https://example.com/a.mp4")!
-]
-
 ResourceScheduler.default.maxDownloadCount = 4
-
-for url in urls {
-    ResourceRequest(url: url) { result in
-        // 在主线程回调；重复的 a.mp4 请求共享同一个下载任务。
-        print(result.localURL)
-    }.startLoad()
-}
 ```
+
+设置值会传递给 `ResourceDownloader.maxDownloadCount`，被限制在 `3...7` 后，赋给下载队列的 `maxConcurrentOperationCount`。例如设置 `1` 时实际使用 `3`，设置 `10` 时实际使用 `7`。
+
+调度器也使用同一个上限：`startWaitingContextsIfPossible()` 只有在 `downloadingContexts.count < downloader.maxDownloadCount` 时，才从等待队列取出资源、加入下载队列。因此，超过上限的资源会先保留在 `waitingContexts`，等待空位。
+
+### 单个资源如何下载
+
+每个资源的下载由一个继承自 `Operation` 的 `DownloadOperation` 执行，加入 `ResourceDownloader` 的 `OperationQueue` 后，由队列安排启动。
+
+为了让队列跟踪异步下载的生命周期，`DownloadOperation` 重写了以下属性和方法：
+
+| 属性或方法 | 作用 |
+| --- | --- |
+| `isAsynchronous` | 返回 `true`，声明这是异步操作。 |
+| `isExecuting`、`isFinished` | 表示操作是否正在执行、是否已经结束；状态变化时通过 KVO 通知队列，使下载期间持续占用并发名额，结束后释放。 |
+| `start()` | 检查取消状态，将操作标记为正在执行，再调用 `main()`。 |
+| `main()` | 使用下载器传入的 `URLSession` 创建 `URLSessionDownloadTask`；有断点数据时恢复下载，否则根据请求创建任务。登记 task 与操作的对应关系后，调用 `resume()` 开始下载。 |
+| `cancel()` | 取消底层下载任务，并结束操作。 |
+
+`URLSession` 由 `ResourceDownloader` 创建，委托也设置为下载器，因此下载操作通过下载器接收下载结果。
+
+### 等待任务如何调度
+
+`ResourceScheduler` 将待下载资源放入 `waitingContexts`。有空位时，`startWaitingContextsIfPossible()` 按优先级从高到低、同优先级按创建时间从早到晚取出任务，移入 `downloadingContexts` 并提交下载。
+
+任务结束或取消、暂停释放名额后会触发补位；修改并发上限也会重新检查等待队列，降低上限不会取消正在执行的下载。重试任务在等待间隔内不占下载名额，间隔结束后重新入队。
+
+### 如何保证线程安全
+
+调度器和下载器分别用 `NSLock` 保护任务队列、task 与操作的映射；`DownloadOperation` 用 `NSRecursiveLock` 保护操作状态和底层 task，避免下载回调与取消操作并发修改。
+
+进度、成功和失败回调通过 `MainActor` 在主线程执行，调用方可以直接更新 UI。
 
 ## 使用方法
 
