@@ -17,8 +17,12 @@ public enum RequestPriority: Int, Comparable {
     }
 }
 
+public typealias SuccessBlock = @MainActor (ResourceDownloadResult) -> Void
+public typealias ErrorBlock = @MainActor (ResourceTransferError) -> Void
+public typealias ProgressBlock = @MainActor (Float) -> Void
+
 // MARK: - 请求参数封装
-public struct ResourceRequest {
+public class ResourceRequest {
 
     let identifier = UUID()
     
@@ -40,11 +44,11 @@ public struct ResourceRequest {
     /// 资源存在于有效缓存时是否直接使用缓存结果；默认开启。
     public let usesCacheIfAvailable: Bool
     
-    public let completion: (@MainActor (ResourceDownloadResult) -> Void)?
+    private var successBlocks: [SuccessBlock] = []
     
-    public let errorBlock: (@MainActor (ResourceTransferError) -> Void)?
+    private var errorBlock: [ErrorBlock] = []
     
-    public let progressBlock: (@MainActor (Float) -> Void)?
+    private var progressBlock: [ProgressBlock] = []
     
     public init(
         url: URL,
@@ -52,18 +56,51 @@ public struct ResourceRequest {
         priority: RequestPriority = .normal,
         maxFailRetryCount: Int = 3,
         usesCacheIfAvailable: Bool = true,
-        completion: (@MainActor (ResourceDownloadResult) -> Void)? = nil,
-        errorBlock: (@MainActor (ResourceTransferError) -> Void)? = nil,
-        progressBlock: (@MainActor (Float) -> Void)? = nil
     ) {
         self.url = url
         self.customSavePath = customSavePath
         self.initialPriority = priority
         self.maxFailRetryCount = min(max(0, maxFailRetryCount), 5)
         self.usesCacheIfAvailable = usesCacheIfAvailable
-        self.completion = completion
-        self.errorBlock = errorBlock
-        self.progressBlock = progressBlock
+    }
+    
+    @MainActor
+    public func successBlock(_ block: @escaping SuccessBlock) -> ResourceRequest {
+        successBlocks.append(block)
+        return self
+    }
+    
+    @MainActor
+    public func errorBlock(_ block: @escaping ErrorBlock) -> ResourceRequest {
+        errorBlock.append(block)
+        return self
+    }
+    
+    @MainActor
+    public func progressBlock(_ block: @escaping ProgressBlock) -> ResourceRequest {
+        progressBlock.append(block)
+        return self
+    }
+}
+
+extension ResourceRequest {
+    
+    func response(result: ResourceDownloadResult) {
+        Task { @MainActor in
+            successBlocks.forEach{ $0(result) }
+        }
+    }
+    
+    func response(error: ResourceTransferError) {
+        Task { @MainActor in
+            errorBlock.forEach{ $0(error) }
+        }
+    }
+    
+    func response(progress: Float) {
+        Task { @MainActor in
+            progressBlock.forEach{ $0(progress) }
+        }
     }
 }
 

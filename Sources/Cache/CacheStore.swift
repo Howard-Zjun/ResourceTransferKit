@@ -129,6 +129,10 @@ extension CacheStore {
 
         let destinationURL = cacheFileURL(for: key)
         guard CacheMetadata.isStorable(response: response) else {
+            if cacheMetaDatas.contains(where: { $0.resourceKey == key }) {
+                cacheMetaDatas.removeAll { $0.resourceKey == key }
+                try saveMetadata()
+            }
             return downloadResult
         }
         try fileManager.createDirectory(

@@ -209,9 +209,7 @@ extension ResourceScheduler {
                 removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
                 startWaitingContextsIfPossible()
                 lock.unlock()
-                Task { @MainActor in
-                    request.errorBlock?(.underlying(error))
-                }
+                request.response(error: .underlying(error))
                 return
             }
         }
@@ -221,9 +219,7 @@ extension ResourceScheduler {
         removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
         startWaitingContextsIfPossible()
         lock.unlock()
-        Task { @MainActor in
-            request.completion?(result)
-        }
+        request.response(result: result)
     }
     
     func load(request: ResourceRequest, subscriber: DownloadResultSubscriber) {
@@ -250,9 +246,7 @@ extension ResourceScheduler {
             ?? waitingContexts[request.key]
             ?? retryingContexts[request.key] {
             if case .pausing = context.state {
-                Task { @MainActor in
-                    request.errorBlock?(.pausingInProgress)
-                }
+                request.response(error: .pausingInProgress)
                 return
             }
             context.subscribers.append(
@@ -372,9 +366,7 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         context.updateState(.downloading(progress: progress))
         let subscribers = context.subscribers
         lock.unlock()
-        Task { @MainActor in
-            subscribers.forEach { $0.request.progressBlock?(progress) }
-        }
+        subscribers.forEach { $0.request.response(progress: progress) }
     }
     
     func downloadMaxQueueChange() {
@@ -445,10 +437,8 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
             }
             completedSubscribers.append(subscriber)
         }
-        Task { @MainActor in
-            failedSubscribers.forEach { $0.0.request.errorBlock?($0.1) }
-            completedSubscribers.forEach { $0.request.completion?(cachedResult) }
-        }
+        failedSubscribers.forEach { $0.0.request.response(error: $0.1) }
+        completedSubscribers.forEach { $0.request.response(result:cachedResult) }
     }
     
     func downloadFail(key: ResourceKey, error: ResourceTransferError) {
@@ -478,8 +468,6 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
         }
         startWaitingContextsIfPossible()
 
-        Task { @MainActor in
-            failedSubscribers.forEach { $0.request.errorBlock?(error) }
-        }
+        failedSubscribers.forEach { $0.request.response(error: error) }
     }
 }
