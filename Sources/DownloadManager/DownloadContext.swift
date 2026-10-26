@@ -34,11 +34,9 @@ final class DownloadContext {
     
     private(set) var progress: Float?
     
-    private var _mimeType: String?
-    
     private var _fileSize: Int64?
-
-    private var _response: HTTPURLResponse?
+    
+    private var _result: ResourceDownloadResult?
     
     // MARK: - lock end
     private let stateLock = NSLock()
@@ -57,22 +55,16 @@ final class DownloadContext {
         return _state
     }
     
-    var mimeType: String? {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return _mimeType
-    }
-    
     var fileSize: Int64? {
         stateLock.lock()
         defer { stateLock.unlock() }
         return _fileSize
     }
     
-    var response: HTTPURLResponse? {
+    var result: ResourceDownloadResult? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return _response
+        return _result
     }
     
     init(
@@ -271,8 +263,7 @@ extension DownloadContext: DownloadOperationDelegate {
             stateLock.unlock()
             return
         }
-        _response = response
-        _mimeType = result.mimeType
+        _result = result
         _fileSize = result.fileSize
         progress = 1
         _state = .completed
