@@ -8,16 +8,8 @@
 import UIKit
 import ObjectiveC
 
-@MainActor
-private enum ImageRequestAssociation {
-    static var key: UInt8 = 0
-}
-
-private extension UIImageView {
-    var rt_requestIdentifier: UUID? {
-        get { objc_getAssociatedObject(self, &ImageRequestAssociation.key) as? UUID }
-        set { objc_setAssociatedObject(self, &ImageRequestAssociation.key, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
-    }
+private enum AssociatedKeys {
+    static var resourceURL: UInt8 = 0
 }
 
 // MARK: - 图片便捷式入口
@@ -28,38 +20,38 @@ extension UIImageView {
         completion: ((ResourceDownloadResult) -> Void)? = nil,
         errorBlock: ((Error) -> Void)? = nil
     ) {
-        let requestIdentifier = UUID()
-        rt_requestIdentifier = requestIdentifier
-        let request = ResourceRequest(url: resourceURL, priority: .high)
-            .successBlock({ [weak self] result in
-                guard self?.rt_requestIdentifier == requestIdentifier else { return }
-                let localURL = result.localURL
-                Task { @MainActor [weak self] in
-                    do {
-                        let image = try await Task.detached(priority: .userInitiated) {
-                            let data = try Data(contentsOf: localURL)
-                            guard let image = UIImage(data: data) else {
-                                throw CocoaError(.fileReadCorruptFile)
-                            }
-                            return image.preparingForDisplay() ?? image
-                        }.value
-                        guard let self, self.rt_requestIdentifier == requestIdentifier else { return }
-                        self.image = image
-                        completion?(result)
-                    } catch {
-                        guard self?.rt_requestIdentifier == requestIdentifier else { return }
-                        errorBlock?(error)
-                    }
-                }
-            }).errorBlock { [weak self] error in
-                guard self?.rt_requestIdentifier == requestIdentifier else { return }
-                errorBlock?(error)
+        rt_cancel()
+        
+        let subscriber = ResourceRequest.make(url: resourceURL, priority: .high)
+        let identifier = subscriber.identifier
+        subscriber.successBlock { [weak self] result in
+            guard let self,
+                  let current = objc_getAssociatedObject(self, &AssociatedKeys.resourceURL) as? DownloadResultSubscriber,
+                  current.identifier == identifier else { return }
+            objc_setAssociatedObject(self, &AssociatedKeys.resourceURL, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            guard let image = UIImage(contentsOfFile: result.localURL.path) else {
+                errorBlock?(ResourceTransferError.underlying(CocoaError(.fileReadCorruptFile)))
+                return
             }
-        ResourceScheduler.default.load(request: request, subscriber: DownloadResultImageSubscriber(imageView: self))
+            self.image = image
+            completion?(result)
+        }.errorBlock { [weak self] error in
+            guard let self,
+                  let current = objc_getAssociatedObject(self, &AssociatedKeys.resourceURL) as? DownloadResultSubscriber,
+                  current.identifier == identifier else { return }
+            objc_setAssociatedObject(self, &AssociatedKeys.resourceURL, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+            errorBlock?(error)
+        }
+        
+        objc_setAssociatedObject(self, &AssociatedKeys.resourceURL, subscriber, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        subscriber.load()
     }
     
     public func rt_cancel() {
-        rt_requestIdentifier = nil
-        ResourceScheduler.default.cancel(subscriber: DownloadResultImageSubscriber(imageView: self))
+        guard let lastSubscriber = objc_getAssociatedObject(self, &AssociatedKeys.resourceURL) as? DownloadResultSubscriber else {
+            return
+        }
+        objc_setAssociatedObject(self, &AssociatedKeys.resourceURL, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        lastSubscriber.cancel()
     }
 }

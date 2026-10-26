@@ -52,8 +52,8 @@ public final class CacheStore: NSObject {
 
     // MARK: - Unit Test
     #if DEBUG
-    /// 仅供测试注入隔离目录和缓存策略，Release 环境只允许使用 CacheStore.default。
-    init(
+    /// 仅供模块测试注入隔离目录和缓存策略，不属于公开 API，Release 不编译此入口。
+    internal init(
         fileManager: FileManager = .default,
         cacheDirectory: URL? = nil,
         diskCostLimit: Int64 = 300 * 1024 * 1024,
@@ -192,8 +192,8 @@ extension CacheStore {
     }
 
     #if DEBUG
-    /// 仅供不具备 HTTP 响应的缓存单元测试构造测试数据。
-    func save(
+    /// 仅供模块测试构造不具备 HTTP 响应的缓存数据，Release 不编译此入口。
+    internal func save(
         key: ResourceKey,
         downloadResult: ResourceDownloadResult
     ) throws -> ResourceDownloadResult {

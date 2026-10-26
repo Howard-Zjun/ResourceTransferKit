@@ -8,9 +8,18 @@
 import UIKit
 
 private enum CacheLookupResult {
-    case handled
+    case handled(CacheMetadata)
     case stale(CacheMetadata)
     case miss
+}
+
+private final class SubscriberContext {
+
+    var subscribers: [DownloadResultSubscriber]
+
+    init(subscriber: DownloadResultSubscriber) {
+        subscribers = [subscriber]
+    }
 }
 
 public final class ResourceScheduler: NSObject {
@@ -27,7 +36,10 @@ public final class ResourceScheduler: NSObject {
     /// 正在等待重试间隔结束的任务。
     private var retryingContexts: [ResourceKey: DownloadContext] = [:]
     
+    private var subscribers: [ResourceKey : SubscriberContext] = [:]
+
     // MARK: -------------- lock end
+    
     private let lock: NSLock = .init()
 
     private let configuration: URLSessionConfiguration
@@ -36,12 +48,13 @@ public final class ResourceScheduler: NSObject {
     
     private lazy var downloader: ResourceDownloader = {
         let result = ResourceDownloader(configuration: self.configuration)
-        result.schedulerDelegate = self
         return result
     }()
     
     public static let `default`: ResourceScheduler = .init()
 
+    /// 实际下载并发上限，范围为 3...7，默认值为 5。
+    /// 降低上限不会取消正在执行的下载。
     public var maxDownloadCount: Int {
         get {
             lock.lock()
@@ -50,9 +63,9 @@ public final class ResourceScheduler: NSObject {
         }
         set {
             lock.lock()
-            let downloader = downloader
-            lock.unlock()
             downloader.maxDownloadCount = newValue
+            lock.unlock()
+            startWaitingContextsIfPossible()
         }
     }
     
@@ -64,8 +77,8 @@ public final class ResourceScheduler: NSObject {
 
     // MARK: - Unit Test
     #if DEBUG
-    /// 仅供测试注入 URLProtocol 配置，Release 环境只允许使用 ResourceScheduler.default。
-    init(configuration: URLSessionConfiguration) {
+    /// 仅供模块测试注入 URLProtocol 配置，不属于公开 API，Release 不编译此入口。
+    internal init(configuration: URLSessionConfiguration) {
         self.configuration = configuration
         cacheStore = .default
         super.init()
@@ -73,251 +86,160 @@ public final class ResourceScheduler: NSObject {
     #endif
 }
 
-// MARK: - 暂停/取消下载
+// MARK: - 取消加载
 extension ResourceScheduler {
     
-    func pause(request: ResourceRequest) {
-        func removeRequestSubscriber(_ request: ResourceRequest, from context: DownloadContext) -> Bool {
-            let subscriberCount = context.subscribers.count
-            context.subscribers.removeAll { $0.request.identifier == request.identifier }
-            return subscriberCount != context.subscribers.count
+    /// 外部加锁保证安全
+    private func removeSubscriber(subscriber: DownloadResultSubscriber) -> DownloadContext? {
+        let resource = subscriber.resource
+        guard let context = downloadingContexts[resource.key]
+                ?? waitingContexts[resource.key]
+                ?? retryingContexts[resource.key] else {
+            return nil
         }
         
+        guard let subscriberContext = subscribers[resource.key],
+              subscriberContext.subscribers.contains(where: { $0 === subscriber }) else {
+            return nil
+        }
+        subscriberContext.subscribers.removeAll(where: { $0 === subscriber })
+        
+        return context
+    }
+    
+    internal func cancel(subscriber: DownloadResultSubscriber) {
+        subscriber.invalidateCallbacks()
         lock.lock()
-
-        guard let context = downloadingContexts[request.key]
-            ?? waitingContexts[request.key]
-            ?? retryingContexts[request.key],
-              removeRequestSubscriber(request, from: context) else {
+        
+        let resource = subscriber.resource
+        guard let context = removeSubscriber(subscriber: subscriber),
+              let subscriberContext = subscribers[resource.key] else {
             lock.unlock()
             return
         }
-        if context.subscribers.isEmpty {
-            waitingContexts.removeValue(forKey: request.key)
-            retryingContexts.removeValue(forKey: request.key)
-            guard downloadingContexts.removeValue(forKey: request.key) != nil, (context.fileSize ?? 0) >= Self.minimumResumableBytes else {
-                context.cancel()
-                startWaitingContextsIfPossible()
-                lock.unlock()
-                return
-            }
-            downloadingContexts[request.key] = context
-            context.updateState(.pausing)
+        
+        if subscriberContext.subscribers.isEmpty {
+            subscribers.removeValue(forKey: resource.key)
+            waitingContexts.removeValue(forKey: resource.key)
+            retryingContexts.removeValue(forKey: resource.key)
+            let wasDownloading = downloadingContexts.removeValue(forKey: resource.key) != nil
             lock.unlock()
-            context.cancelPreservingResumeData { [weak self, weak context] canResume in
-                guard let self, let context else { return }
-                self.lock.lock()
-                guard self.downloadingContexts[context.key] === context else {
-                    self.lock.unlock()
-                    return
-                }
-                self.downloadingContexts.removeValue(forKey: context.key)
-                if canResume {
-                    context.updateState(.paused)
-                    // TODO: 为无订阅者的暂停任务增加容量或 TTL 回收策略。
-                    self.waitingContexts[context.key] = context
-                }
-                self.startWaitingContextsIfPossible()
-                lock.unlock()
-            }
-            lock.lock()
-        } else {
-            context.effectivePriority = context.subscribers.map { $0.request.initialPriority }.max() ?? .normal
-        }
-        
-        startWaitingContextsIfPossible()
-        lock.unlock()
-    }
-    
-    func cancel(request: ResourceRequest) {
-        lock.lock()
-        defer { lock.unlock() }
-        
-        if let context = downloadingContexts[request.key]
-            ?? waitingContexts[request.key]
-            ?? retryingContexts[request.key] {
-            context.subscribers.removeAll { $0.request.identifier == request.identifier }
-            if context.subscribers.isEmpty {
-                waitingContexts.removeValue(forKey: request.key)
-                downloadingContexts.removeValue(forKey: request.key)
-                retryingContexts.removeValue(forKey: request.key)
-                context.cancel()
+            if wasDownloading, (context.fileSize ?? 0) >= Self.minimumResumableBytes {
+                context.cancelPreservingResumeData { _ in }
             } else {
-                context.effectivePriority = context.subscribers.map { $0.request.initialPriority }.max() ?? .normal
+                context.cancel()
             }
+        } else {
+            context.effectivePriority = subscriberContext.subscribers.map { $0.resource.priority }.max() ?? .normal
+            lock.unlock()
         }
-        startWaitingContextsIfPossible()
-    }
-    
-    func cancel(subscriber: DownloadResultSubscriber) {
-        lock.lock()
-        defer { lock.unlock() }
-        
-        removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
-        removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
-        removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
         startWaitingContextsIfPossible()
     }
 }
 
+// MARK: - 开启下载任务
 extension ResourceScheduler {
     
-    private func cacheHandle(request: ResourceRequest, subscriber: DownloadResultSubscriber) -> CacheLookupResult {
-        guard request.usesCacheIfAvailable,
-              let cacheResult = cacheStore.load(key: request.key) else {
+    private func cacheHandle(resource: ResourceRequest) -> CacheLookupResult {
+        guard resource.usesCacheIfAvailable,
+              let cacheResult = cacheStore.load(key: resource.key) else {
             return .miss
         }
         guard cacheResult.isFresh else {
             return .stale(cacheResult)
         }
      
-        completeRequestFromCache(request: request, subscriber: subscriber, cacheResult: cacheResult)
-        return .handled
+        return .handled(cacheResult)
     }
     
-    private func completeRequestFromCache(request: ResourceRequest, subscriber: DownloadResultSubscriber, cacheResult: CacheMetadata) {
+    private func responseFromCache(subscriber: DownloadResultSubscriber, cacheResult: CacheMetadata) {
         let result = ResourceDownloadResult(
             localURL: cacheResult.localURL,
             fileSize: cacheResult.fileSize,
             mimeType: cacheResult.mimeType
         )
-        if let path = request.customSavePath,
-           path.standardizedFileURL != result.localURL.standardizedFileURL {
-            do {
-                var isDirectory: ObjCBool = false
-                let exists = FileManager.default.fileExists(
-                    atPath: path.path,
-                    isDirectory: &isDirectory
-                )
-                guard path.isFileURL, !path.hasDirectoryPath,
-                      !(exists && isDirectory.boolValue) else {
-                    throw CocoaError(.fileWriteInvalidFileName)
-                }
-                let destination = path.standardizedFileURL
-                try FileManager.default.createDirectory(
-                    at: destination.deletingLastPathComponent(),
-                    withIntermediateDirectories: true
-                )
-                if FileManager.default.fileExists(atPath: destination.path) {
-                    try FileManager.default.removeItem(at: destination)
-                }
-                try FileManager.default.copyItem(at: result.localURL, to: destination)
-            } catch {
-                lock.lock()
-                removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
-                removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
-                removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
-                startWaitingContextsIfPossible()
-                lock.unlock()
-                request.response(error: .underlying(error))
-                return
-            }
-        }
-        lock.lock()
-        removeSubscriber(subscriber, exceptFor: nil, from: &waitingContexts)
-        removeSubscriber(subscriber, exceptFor: nil, from: &downloadingContexts)
-        removeSubscriber(subscriber, exceptFor: nil, from: &retryingContexts)
-        startWaitingContextsIfPossible()
-        lock.unlock()
-        request.response(result: result)
+        sendSuccess(to: [subscriber], result: result)
     }
     
-    func load(request: ResourceRequest, subscriber: DownloadResultSubscriber) {
-        let cachedMetadata: CacheMetadata?
-        switch cacheHandle(request: request, subscriber: subscriber) {
-        case .handled:
+    /// 加锁确认安全
+    private func findMatchContext(resource: ResourceRequest) -> DownloadContext? {
+        downloadingContexts[resource.key]
+        ?? waitingContexts[resource.key]
+        ?? retryingContexts[resource.key]
+    }
+    
+    internal func load(subscriber: DownloadResultSubscriber) {
+        guard subscriber.attach(to: self) else { return }
+        let resource = subscriber.resource
+        lock.lock()
+        if let context = findMatchContext(resource: resource) {
+            appendSubscriber(subscriber, to: context)
+            lock.unlock()
             return
-        case let .stale(metadata):
-            cachedMetadata = metadata
-        case .miss:
-            cachedMetadata = nil
+        }
+        lock.unlock()
+
+        switch cacheHandle(resource: resource) {
+        case let .handled(metadata):
+            responseFromCache(subscriber: subscriber, cacheResult: metadata)
+            return
+        case .miss, .stale:
+            break
         }
 
         lock.lock()
-        defer { lock.unlock() }
-
-        // 1. 当前订阅者若已订阅其他资源，先解除旧订阅。
-        removeSubscriber(subscriber, exceptFor: request.key, from: &waitingContexts)
-        removeSubscriber(subscriber, exceptFor: request.key, from: &downloadingContexts)
-        removeSubscriber(subscriber, exceptFor: request.key, from: &retryingContexts)
-
-        // 2. 命中相同资源时，共用已有任务；等待中的任务还会提升到最高订阅优先级。
-        if let context = downloadingContexts[request.key]
-            ?? waitingContexts[request.key]
-            ?? retryingContexts[request.key] {
-            if case .pausing = context.state {
-                request.response(error: .pausingInProgress)
-                return
-            }
-            context.subscribers.append(
-                DownloadSubscriber(request: request, resultSubscriber: subscriber)
-            )
-            context.effectivePriority = max(context.effectivePriority, request.initialPriority)
-            if case .paused = context.state {
-                context.updateState(.waiting)
-            }
+        defer {
+            lock.unlock()
             startWaitingContextsIfPossible()
-            return
         }
 
-        // 3. 首次请求先进入等待队列；仅在有下载槽位时创建 operation。
-        let context = DownloadContext(
-            request: request,
-            subscriber: subscriber,
-            priority: request.initialPriority,
-            cachedMetadata: cachedMetadata
-        )
-        waitingContexts[request.key] = context
-        startWaitingContextsIfPossible()
+        if let context = findMatchContext(resource: resource) {
+            appendSubscriber(subscriber, to: context)
+        } else {
+            // 创建新的下载任务
+            let context = DownloadContext(resource: resource, scheduler: self)
+            subscribers[resource.key] = SubscriberContext(subscriber: subscriber)
+            waitingContexts[resource.key] = context
+        }
+    }
+
+    /// 调用方持有 lock。
+    private func appendSubscriber(_ subscriber: DownloadResultSubscriber, to context: DownloadContext) {
+        guard let subscriberContext = subscribers[context.key],
+              !subscriberContext.subscribers.contains(where: { $0.matches(subscriber) }) else {
+            return
+        }
+        subscriberContext.subscribers.append(subscriber)
+        context.effectivePriority = max(context.effectivePriority, subscriber.resource.priority)
     }
 }
 
-// MARK: - 调度，需要lock包裹
 extension ResourceScheduler {
     
-    /// 调用方必须持有 lock；按优先级降序、创建时间升序填充所有可用下载槽位。
     private func startWaitingContextsIfPossible() {
-        while downloadingContexts.count < downloader.maxDownloadCount,
-              let context = nextWaitingContext() {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        func nextWaitingContext() -> DownloadContext? {
+            waitingContexts.values.filter {
+                guard let subscriberContext = subscribers[$0.key], !subscriberContext.subscribers.isEmpty else { return false }
+                if case .waiting = $0.state { return true }
+                return false
+            }.max { lhs, rhs in
+                if lhs.effectivePriority != rhs.effectivePriority {
+                    return lhs.effectivePriority < rhs.effectivePriority
+                }
+                return lhs.creationTime > rhs.creationTime
+            }
+        }
+        
+        while downloadingContexts.count < downloader.maxDownloadCount, let context = nextWaitingContext() {
             waitingContexts.removeValue(forKey: context.key)
             downloadingContexts[context.key] = context
-            context.updateState(.downloading(progress: context.progress ?? 0))
             downloader.addDownload(context: context)
         }
     }
     
-    private func nextWaitingContext() -> DownloadContext? {
-        waitingContexts.values.filter {
-            guard !$0.subscribers.isEmpty else { return false }
-            if case .waiting = $0.state { return true }
-            return false
-        }.max { lhs, rhs in
-            if lhs.effectivePriority != rhs.effectivePriority {
-                return lhs.effectivePriority < rhs.effectivePriority
-            }
-            return lhs.creationTime > rhs.creationTime
-        }
-    }
-    
-    private func removeSubscriber(
-        _ subscriber: DownloadResultSubscriber,
-        exceptFor retainedKey: ResourceKey?,
-        from contexts: inout [ResourceKey: DownloadContext]
-    ) {
-        let keysToRemove = contexts.compactMap { key, context -> ResourceKey? in
-            guard key != retainedKey else {
-                return nil
-            }
-            let subscriberCount = context.subscribers.count
-            context.subscribers.removeAll { $0.resultSubscriber.matches(subscriber) }
-            return subscriberCount != context.subscribers.count && context.subscribers.isEmpty ? key : nil
-        }
-
-        for key in keysToRemove {
-            let context = contexts.removeValue(forKey: key)
-            context?.cancel()
-        }
-    }
 }
 
 extension ResourceScheduler {
@@ -327,87 +249,57 @@ extension ResourceScheduler {
         return TimeInterval(1 << exponent)
     }
     
-    private func enqueueRetry(key: ResourceKey, context: DownloadContext) {
+    private func enqueueRetry(context: DownloadContext) {
         lock.lock()
-        defer { lock.unlock() }
-
-        guard let retryingContext = retryingContexts[key], retryingContext === context else {
+        guard retryingContexts[context.key] === context,
+              let subscriberContext = subscribers[context.key],
+              !subscriberContext.subscribers.isEmpty,
+              context.prepareForRetry() else {
+            lock.unlock()
             return
         }
-        retryingContexts.removeValue(forKey: key)
-        context.updateState(.waiting)
-        waitingContexts[key] = context
+        retryingContexts.removeValue(forKey: context.key)
+        waitingContexts[context.key] = context
+        lock.unlock()
         startWaitingContextsIfPossible()
     }
 }
 
-extension ResourceScheduler: ResourceDownloaderDelegate {
+extension ResourceScheduler {
     
-    func downloadProgress(key: ResourceKey, mimeType: String?, bytesWritten: Int64, expectedBytes: Int64) {
+    internal func responseProgress(context: DownloadContext, progress: Float) {
         lock.lock()
-        guard let context = downloadingContexts[key] else {
+        guard downloadingContexts[context.key] === context else {
             lock.unlock()
             return
         }
-        guard case .downloading = context.state else {
-            lock.unlock()
-            return
-        }
-        if context.startDownloadTime == nil {
-            context.startDownloadTime = .init()
-        }
-        context.updateDownloadMetadata(mimeType: mimeType, fileSize: bytesWritten)
-        guard expectedBytes > 0 else {
-            lock.unlock()
-            return
-        }
-        let progress = Float(bytesWritten) / Float(expectedBytes)
-        context.progress = progress
-        context.updateState(.downloading(progress: progress))
-        let subscribers = context.subscribers
+        let snapshot = subscribers[context.key]?.subscribers ?? []
         lock.unlock()
-        subscribers.forEach { $0.request.response(progress: progress) }
-    }
-    
-    func downloadMaxQueueChange() {
-        lock.lock()
-        defer { lock.unlock() }
         
-        startWaitingContextsIfPossible()
+        snapshot.forEach { $0.response(progress: progress) }
     }
-    
-    func downloadSuccess(key: ResourceKey, result: ResourceDownloadResult) {
+        
+    internal func responseBySuccess(context: DownloadContext, result: ResourceDownloadResult) {
         lock.lock()
-        guard let context = downloadingContexts.removeValue(forKey: key) else {
+        guard downloadingContexts[context.key] === context else {
             lock.unlock()
             return
         }
-        context.updateState(.completed)
-        let subscribers = context.subscribers
-        startWaitingContextsIfPossible()
+        downloadingContexts.removeValue(forKey: context.key)
+        let snapshot = subscribers.removeValue(forKey: context.key)?.subscribers ?? []
         lock.unlock()
 
-        let cachedResult: ResourceDownloadResult
-        if let response = context.response, response.statusCode == 304 {
-            cachedResult = cacheStore.revalidate(key: key, response: response) ?? result
-        } else if let response = context.response {
-            cachedResult = (try? cacheStore.save(
-                key: key,
-                downloadResult: result,
-                response: response
-            )) ?? result
-        } else {
-            cachedResult = result
-        }
+        sendSuccess(to: snapshot, result: result)
+        startWaitingContextsIfPossible()
+    }
 
-        var copies: [URL: Result<Void, Error>] = [:]
-        var failedSubscribers: [(DownloadSubscriber, ResourceTransferError)] = []
-        var completedSubscribers: [DownloadSubscriber] = []
+    private func sendSuccess(to subscribers: [DownloadResultSubscriber], result: ResourceDownloadResult) {
         let fileManager = FileManager.default
+        var copies: [URL: Result<Void, Error>] = [:]
         for subscriber in subscribers {
             do {
-                if let path = subscriber.request.customSavePath,
-                   path.standardizedFileURL != cachedResult.localURL.standardizedFileURL {
+                if let path = subscriber.resource.customSavePath,
+                   path.standardizedFileURL != result.localURL.standardizedFileURL {
                     var isDirectory: ObjCBool = false
                     let exists = fileManager.fileExists(atPath: path.path, isDirectory: &isDirectory)
                     guard path.isFileURL, !path.hasDirectoryPath, !(exists && isDirectory.boolValue) else {
@@ -418,56 +310,55 @@ extension ResourceScheduler: ResourceDownloaderDelegate {
                         try copy.get()
                     } else {
                         let copy = Result<Void, Error> {
-                            try fileManager.createDirectory(
-                                at: destination.deletingLastPathComponent(),
-                                withIntermediateDirectories: true
-                            )
+                            try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
                             if fileManager.fileExists(atPath: destination.path) {
                                 try fileManager.removeItem(at: destination)
                             }
-                            try fileManager.copyItem(at: cachedResult.localURL, to: destination)
+                            try fileManager.copyItem(at: result.localURL, to: destination)
                         }
                         copies[destination] = copy
                         try copy.get()
                     }
                 }
+                subscriber.response(result: result)
             } catch {
-                failedSubscribers.append((subscriber, .underlying(error)))
-                continue
+                subscriber.response(error: .underlying(error))
             }
-            completedSubscribers.append(subscriber)
         }
-        failedSubscribers.forEach { $0.0.request.response(error: $0.1) }
-        completedSubscribers.forEach { $0.request.response(result:cachedResult) }
     }
     
-    func downloadFail(key: ResourceKey, error: ResourceTransferError) {
+    internal func responseByFail(context: DownloadContext, error: ResourceTransferError) {
         lock.lock()
-        defer { lock.unlock() }
-        
-        guard let context = downloadingContexts.removeValue(forKey: key) else {
+        guard downloadingContexts[context.key] === context,
+              let subscriberContext = subscribers[context.key] else {
+            lock.unlock()
             return
         }
-
-        context.failRetryCount += 1
-        let failedSubscribers = context.subscribers.filter {
-            !error.isRetryable || context.failRetryCount > $0.request.maxFailRetryCount
+        downloadingContexts.removeValue(forKey: context.key)
+        let failRetryCount = context.failRetryCount
+        let failedSubscribers = subscriberContext.subscribers.filter {
+            !error.isRetryable || failRetryCount > $0.resource.maxFailRetryCount
         }
-        context.subscribers.removeAll {
-            !error.isRetryable || context.failRetryCount > $0.request.maxFailRetryCount
+        subscriberContext.subscribers.removeAll {
+            !error.isRetryable || failRetryCount > $0.resource.maxFailRetryCount
         }
-        if !context.subscribers.isEmpty {
-            context.updateState(.retrying(failRetryCount: context.failRetryCount))
-            retryingContexts[key] = context
-            let retryDelay = retryDelay(for: context.failRetryCount)
-            DispatchQueue.global().asyncAfter(deadline: .now() + retryDelay) { [weak self] in
-                self?.enqueueRetry(key: key, context: context)
-            }
+        let shouldRetry = !subscriberContext.subscribers.isEmpty
+        let delay = retryDelay(for: failRetryCount)
+        if shouldRetry {
+            context.effectivePriority = subscriberContext.subscribers.map { $0.resource.priority }.max() ?? .normal
+            retryingContexts[context.key] = context
         } else {
-            context.updateState(.failed(error))
+            subscribers.removeValue(forKey: context.key)
+            context.finishFailure(error)
+        }
+        lock.unlock()
+
+        failedSubscribers.forEach { $0.response(error: error) }
+        if shouldRetry {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.enqueueRetry(context: context)
+            }
         }
         startWaitingContextsIfPossible()
-
-        failedSubscribers.forEach { $0.request.response(error: error) }
     }
 }

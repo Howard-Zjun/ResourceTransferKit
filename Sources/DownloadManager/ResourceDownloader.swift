@@ -8,17 +8,6 @@
 import Foundation
 import UIKit
 
-protocol ResourceDownloaderDelegate: NSObjectProtocol {
-    
-    func downloadProgress(key: ResourceKey, mimeType: String?, bytesWritten: Int64, expectedBytes: Int64)
-    
-    func downloadMaxQueueChange()
-    
-    func downloadSuccess(key: ResourceKey, result: ResourceDownloadResult)
-    
-    func downloadFail(key: ResourceKey, error: ResourceTransferError)
-}
-
 public final class ResourceDownloader: NSObject {
 
     var maxDownloadRange: (Int, Int) = (3, 7)
@@ -28,8 +17,6 @@ public final class ResourceDownloader: NSObject {
     private var operationsByTaskIdentifier: [Int: DownloadOperation] = [:]
 
     private let operationsLock: NSLock = .init()
-    
-    weak var schedulerDelegate: ResourceDownloaderDelegate?
     
     public var maxDownloadCount: Int {
         set {
@@ -42,11 +29,14 @@ public final class ResourceDownloader: NSObject {
                 count = newValue
             }
             downloadQueue.maxConcurrentOperationCount = count
-            schedulerDelegate?.downloadMaxQueueChange()
         }
         get {
             downloadQueue.maxConcurrentOperationCount
         }
+    }
+    
+    public var canAcceptTask: Bool {
+        operationsByTaskIdentifier.count < maxDownloadCount
     }
     
     // 多线程管理
@@ -60,8 +50,8 @@ public final class ResourceDownloader: NSObject {
         configInit()
     }
 
-    /// 仅供模块内部和测试注入自定义网络配置。
-    init(configuration: URLSessionConfiguration) {
+    /// 供调度器创建下载器，不属于公开 API；正常下载也依赖此入口。
+    internal init(configuration: URLSessionConfiguration) {
         super.init()
         session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
         configInit()
@@ -93,40 +83,24 @@ extension ResourceDownloader {
     }
 }
 
-extension ResourceDownloader {
-    
-    func downloadSuccess(key: ResourceKey, result: ResourceDownloadResult) {
-        schedulerDelegate?.downloadSuccess(key: key, result: result)
-    }
-    
-    func downloadFail(key: ResourceKey, error: ResourceTransferError) {
-        schedulerDelegate?.downloadFail(key: key, error: error)
-    }
-}
-
 extension ResourceDownloader: URLSessionDownloadDelegate {
     
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-        removeTaskIdentifier(for: downloadTask)?.didFinishDownloading(
+        removeTaskIdentifier(for: downloadTask)?.didFinish(
             at: location,
             response: downloadTask.response
         )
     }
 
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard let url = downloadTask.originalRequest?.url else {
-            return
-        }
-        schedulerDelegate?.downloadProgress(
-            key: .init(url: url),
-            mimeType: downloadTask.response?.mimeType,
-            bytesWritten: totalBytesWritten,
-            expectedBytes: totalBytesExpectedToWrite
-        )
+        operationsLock.lock()
+        let operation = operationsByTaskIdentifier[downloadTask.taskIdentifier]
+        operationsLock.unlock()
+        operation?.didLoad(didWriteData: bytesWritten, totalBytesWritten: totalBytesWritten, totalBytesExpectedToWrite: totalBytesExpectedToWrite)
     }
 
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        removeTaskIdentifier(for: task)?.didComplete(with: error)
+        removeTaskIdentifier(for: task)?.didError(with: error)
     }
 }
 

@@ -11,23 +11,25 @@ protocol DownloadOperationDelegate: AnyObject {
 
     var key: ResourceKey { get }
     var urlRequest: URLRequest { get }
-    func downloadOperationDidAttach(_ operation: DownloadOperation)
+    func didAttach(_ operation: DownloadOperation)
+    func willLoad(_ operation: DownloadOperation)
+    func loading(_ operation: DownloadOperation, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64)
+    func loadEndBySuccess(_ operation: DownloadOperation, at temporaryURL: URL, response: URLResponse?)
+    func loadEndByError(_ operation: DownloadOperation, error: Error?)
     func downloadOperationResumeData(_ operation: DownloadOperation) -> Data?
-    func downloadOperation(_ operation: DownloadOperation, didFinishDownloadingAt temporaryURL: URL, response: URLResponse?) -> Result<ResourceDownloadResult, ResourceTransferError>
-    func downloadOperationDidDetach(_ operation: DownloadOperation)
+    func loadEndByCancel(_ operation: DownloadOperation)
 }
 
 
 // MARK: - 下载任务
 class DownloadOperation: Operation, @unchecked Sendable {
 
-    private weak var context: DownloadOperationDelegate?
+    private weak var delegate: DownloadOperationDelegate?
 
     private let session: URLSession
 
     private weak var downloader: ResourceDownloader?
 
-    /// 统一保护 Operation 状态与 URLSession task，避免回调线程和取消线程并发读写。
     private let stateLock = NSRecursiveLock()
 
     private var task: URLSessionDownloadTask?
@@ -55,11 +57,11 @@ class DownloadOperation: Operation, @unchecked Sendable {
         session: URLSession,
         downloader: ResourceDownloader
     ) {
-        self.context = context
+        self.delegate = context
         self.session = session
         self.downloader = downloader
         super.init()
-        context.downloadOperationDidAttach(self)
+        delegate?.didAttach(self)
     }
     
     override func start() {
@@ -82,15 +84,15 @@ class DownloadOperation: Operation, @unchecked Sendable {
     }
     
     override func main() {
-        guard let context else {
+        guard let delegate else {
             finish()
             return
         }
         let task: URLSessionDownloadTask
-        if let resumeData = context.downloadOperationResumeData(self) {
+        if let resumeData = delegate.downloadOperationResumeData(self) {
             task = session.downloadTask(withResumeData: resumeData)
         } else {
-            task = session.downloadTask(with: context.urlRequest)
+            task = session.downloadTask(with: delegate.urlRequest)
         }
         resume(task: task)
     }
@@ -104,8 +106,9 @@ class DownloadOperation: Operation, @unchecked Sendable {
         }
         self.task = task
         downloader?.register(self, for: task)
-        task.resume()
         stateLock.unlock()
+        delegate?.willLoad(self)
+        task.resume()
     }
     
     override func cancel() {
@@ -123,7 +126,7 @@ class DownloadOperation: Operation, @unchecked Sendable {
         if let task {
             _ = downloader?.removeTaskIdentifier(for: task)
         }
-        context?.downloadOperationDidDetach(self)
+        delegate?.loadEndByCancel(self)
         guard let task else {
             finish()
             DispatchQueue.global().async {
@@ -139,31 +142,18 @@ class DownloadOperation: Operation, @unchecked Sendable {
     
     private func finish() {
         stateLock.lock()
+        defer { stateLock.unlock() }
         guard !_isFinished else {
-            stateLock.unlock()
             return
         }
-
+        
         willChangeValue(for: \.isExecuting)
         willChangeValue(for: \.isFinished)
-        
+        self.task = nil
         _isExecuting = false
         _isFinished = true
-        
-        didChangeValue(for: \.isExecuting)
         didChangeValue(for: \.isFinished)
-        stateLock.unlock()
-    }
-    
-    private func clearTask() {
-        stateLock.lock()
-        let task = task
-        self.task = nil
-        stateLock.unlock()
-        if let task {
-            _ = downloader?.removeTaskIdentifier(for: task)
-        }
-        context?.downloadOperationDidDetach(self)
+        didChangeValue(for: \.isExecuting)
     }
 
     private func cancelTask() {
@@ -174,45 +164,31 @@ class DownloadOperation: Operation, @unchecked Sendable {
         if let task {
             _ = downloader?.removeTaskIdentifier(for: task)
         }
-        context?.downloadOperationDidDetach(self)
+        delegate?.loadEndByCancel(self)
         task?.cancel()
     }
 }
 
 extension DownloadOperation {
     
-    func didFinishDownloading(at temporaryURL: URL, response: URLResponse?) {
+    func didFinish(at temporaryURL: URL, response: URLResponse?) {
         defer {
-            clearTask()
             finish()
         }
         guard !isCancelled else { return }
-        guard let context else { return }
-        switch context.downloadOperation(
-            self,
-            didFinishDownloadingAt: temporaryURL,
-            response: response
-        ) {
-        case let .success(result):
-            downloader?.downloadSuccess(key: context.key, result: result)
-        case let .failure(error):
-            downloader?.downloadFail(key: context.key, error: error)
-        }
+        delegate?.loadEndBySuccess(self, at: temporaryURL, response: response)
     }
 
-    func didComplete(with error: Error?) {
-        guard let error else { return }
+    func didLoad(didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        delegate?.loading(self, didWriteData: bytesWritten, totalBytesWritten: totalBytesWritten, totalBytesExpectedToWrite: totalBytesExpectedToWrite)
+    }
+    
+    func didError(with error: Error?) {
         defer {
-            clearTask()
             finish()
         }
-        guard !isCancelled, let context else { return }
-
-        if let urlError = error as? URLError {
-            downloader?.downloadFail(key: context.key, error: .network(urlError))
-        } else {
-            downloader?.downloadFail(key: context.key, error: .underlying(error))
-        }
+        guard !isCancelled else { return }
+        delegate?.loadEndByError(self, error: error)
     }
     
 }
